@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
+    <title>ML Parameter Distributions - WebGPU Single Canvas</title>
+    <style>
+        body {
+            font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+            margin: 0;
+            padding: 20px 0;
+            background: #f5f5f5;
+            font-size: 14px;
+            overflow-x: auto;
+            min-width: 320px;
+        }
+        .container {
+            width: 900px;
+            max-width: 100%;
+            margin: 0 auto;
+            background: white;
+            padding: 40px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+            box-sizing: border-box;
+        }
+        @media (max-width: 940px) {
+            .container {
+                padding: 20px;
+            }
+        }
+        @media (max-width: 600px) {
+            body {
+                padding: 0;
+            }
+            .container {
+                width: 100%;
+                box-shadow: none;
+                padding: 20px 15px;
+            }
+        }
+        .nav {
+            text-align: center;
+            margin-bottom: 20px;
+            font-size: 12px;
+            white-space: nowrap;
+            overflow-x: auto;
+            padding: 5px 0;
+        }
+        .nav a {
+            margin: 0 10px;
+            color: #0066cc;
+            text-decoration: none;
+        }
+        .nav a:hover {
+            text-decoration: underline;
+        }
+        .nav .current {
+            color: #333;
+            font-weight: bold;
+        }
+        @media (max-width: 600px) {
+            .nav {
+                font-size: 10px;
+            }
+            .nav a {
+                margin: 0 5px;
+            }
+        }
+        @media (max-width: 400px) {
+            .nav {
+                font-size: 9px;
+            }
+            .nav a {
+                margin: 0 3px;
+            }
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+            font-size: 18px;
+            margin: 10px 0 20px 0;
+        }
+        .visualization-wrapper {
+            display: flex;
+            align-items: flex-start;
+            margin: 20px auto;
+            justify-content: center;
+            overflow-x: hidden;
+            transform-origin: top left;
+            transition: transform 0.1s ease-out;
+        }
+        @media (max-width: 600px) {
+            .visualization-wrapper {
+                margin: 10px auto;
+            }
+        }
+        .labels-column {
+            width: auto;
+            padding-right: 8px;
+            flex-shrink: 0;
+        }
+        .label-item {
+            height: 32px;
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            font-size: 12px;
+            color: #333;
+            padding-right: 0;
+            white-space: nowrap;
+        }
+        .label-item .param-name {
+            color: red;
+        }
+        .canvas-container {
+            background: transparent;
+        }
+        canvas {
+            display: block;
+            background: transparent;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="nav">
+            <a href="ScalarDistributionList-WebGL.html">WebGL</a>
+            <a href="ScalarDistributionList-WebGPU.html">WebGPU</a>
+            <a href="ScalarDistributionList-WebGL-SingleCanvas.html">WebGL Single Canvas</a>
+            <span class="current">WebGPU Single Canvas</span>
+        </div>
+        <h1 id="fps-header">Rendering machine learning parameters at <span id="fps-display">--</span> fps</h1>
+        <div class="visualization-wrapper">
+            <div class="labels-column" id="labels-column">
+                <!-- Labels will be added here by JavaScript -->
+            </div>
+            <div class="canvas-container">
+                <canvas id="visualization"></canvas>
+            </div>
+        </div>
+    </div>
+    <script src="ScalarDistributionList-WebGPU-SingleCanvas.js"></script>
+    <script>
+        function scaleVisualizationToFit() {
+            const wrapper = document.querySelector('.visualization-wrapper');
+            const container = document.querySelector('.container');
+            
+            // Reset scale to measure actual content width
+            wrapper.style.transform = 'scale(1)';
+            wrapper.style.width = 'auto';
+            
+            // Wait for next frame to ensure layout is updated
+            requestAnimationFrame(() => {
+                // Get the actual content width
+                const contentWidth = wrapper.scrollWidth;
+                const containerWidth = container.clientWidth;
+                
+                // Calculate scale needed to fit content within container
+                const scale = Math.min(1, containerWidth / contentWidth);
+                
+                // Apply scale
+                wrapper.style.transform = `scale(${scale})`;
+                
+                // Adjust width to prevent layout issues
+                if (scale < 1) {
+                    wrapper.style.width = `${100 / scale}%`;
+                } else {
+                    wrapper.style.width = 'auto';
+                }
+            });
+        }
+        
+        // Scale on load
+        window.addEventListener('load', scaleVisualizationToFit);
+        
+        // Scale on resize
+        window.addEventListener('resize', scaleVisualizationToFit);
+        
+        // Scale when content changes (observer for dynamic content)
+        const observer = new MutationObserver(scaleVisualizationToFit);
+        observer.observe(document.querySelector('.visualization-wrapper'), {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['width', 'height']
+        });
+    </script>
+</body>
+</html>

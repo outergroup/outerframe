@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
+    <title>ML Parameter Distributions - WebGPU</title>
+    <style>
+        body {
+            font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+            margin: 0;
+            padding: 20px 0;
+            background: #f5f5f5;
+            font-size: 14px;
+            overflow-x: auto;
+            min-width: 320px;
+        }
+        .container {
+            width: 900px;
+            max-width: 100%;
+            margin: 0 auto;
+            background: white;
+            padding: 40px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+            box-sizing: border-box;
+        }
+        @media (max-width: 940px) {
+            .container {
+                padding: 20px;
+            }
+        }
+        @media (max-width: 600px) {
+            body {
+                padding: 0;
+            }
+            .container {
+                width: 100%;
+                box-shadow: none;
+                padding: 20px 15px;
+            }
+        }
+        .nav {
+            text-align: center;
+            margin-bottom: 20px;
+            font-size: 12px;
+            white-space: nowrap;
+            overflow-x: auto;
+            padding: 5px 0;
+        }
+        .nav a {
+            margin: 0 10px;
+            color: #0066cc;
+            text-decoration: none;
+        }
+        .nav a:hover {
+            text-decoration: underline;
+        }
+        .nav .current {
+            color: #333;
+            font-weight: bold;
+        }
+        @media (max-width: 600px) {
+            .nav {
+                font-size: 10px;
+            }
+            .nav a {
+                margin: 0 5px;
+            }
+        }
+        @media (max-width: 400px) {
+            .nav {
+                font-size: 9px;
+            }
+            .nav a {
+                margin: 0 3px;
+            }
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+            font-size: 18px;
+            margin: 10px 0 20px 0;
+        }
+        #distributions {
+            margin-top: 20px;
+            padding: 0 40px;
+            font-size: 12px;
+            color: #333;
+            line-height: 35px;
+            overflow-x: hidden;
+            transform-origin: top left;
+            transition: transform 0.1s ease-out;
+        }
+        @media (max-width: 600px) {
+            #distributions {
+                padding: 0 10px;
+                font-size: 11px;
+            }
+        }
+        .param-name {
+            color: red;
+        }
+        canvas {
+            display: inline-block;
+            vertical-align: middle;
+            margin: 0 4px;
+            background: transparent;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="nav">
+            <a href="ScalarDistributionList-WebGL.html">WebGL</a>
+            <span class="current">WebGPU</span>
+            <a href="ScalarDistributionList-WebGL-SingleCanvas.html">WebGL Single Canvas</a>
+            <a href="ScalarDistributionList-WebGPU-SingleCanvas.html">WebGPU Single Canvas</a>
+        </div>
+        <h1 id="fps-header">Rendering machine learning parameters at <span id="fps-display">--</span> fps</h1>
+        <pre id="distributions"></pre>
+        <div id="error-container" style="display: none;"></div>
+    </div>
+    <script src="ScalarDistributionList-WebGPU.js"></script>
+    <script>
+        function scaleDistributionsToFit() {
+            const distributions = document.getElementById('distributions');
+            const container = document.querySelector('.container');
+            
+            // Reset scale to measure actual content width
+            distributions.style.transform = 'scale(1)';
+            distributions.style.width = 'auto';
+            
+            // Wait for next frame to ensure layout is updated
+            requestAnimationFrame(() => {
+                // Get the actual content width (including padding)
+                const contentWidth = distributions.scrollWidth;
+                const containerWidth = container.clientWidth;
+                
+                // Calculate scale needed to fit content within container
+                const scale = Math.min(1, containerWidth / contentWidth);
+                
+                // Apply scale
+                distributions.style.transform = `scale(${scale})`;
+                
+                // Adjust width to prevent layout issues
+                if (scale < 1) {
+                    distributions.style.width = `${100 / scale}%`;
+                } else {
+                    distributions.style.width = 'auto';
+                }
+            });
+        }
+        
+        // Scale on load
+        window.addEventListener('load', scaleDistributionsToFit);
+        
+        // Scale on resize
+        window.addEventListener('resize', scaleDistributionsToFit);
+        
+        // Scale when content changes (observer for dynamic content)
+        const observer = new MutationObserver(scaleDistributionsToFit);
+        observer.observe(document.getElementById('distributions'), {
+            childList: true,
+            subtree: true,
+            characterData: true
+        });
+    </script>
+</body>
+</html>

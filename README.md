@@ -1,20 +1,25 @@
 # outerframe
 
-An [outerframe](https://probablymarcus.com/blocks/2025/06/08/the-web-could-use-machine-code.html) is like a web view that can run machine code.
+An outerframe is like a web view that can run machine code.
+
+This repo contains a working outerframe implementation for macOS. [Outer Loop](https://outerloop.sh/) uses this code.
+
+Read more:
+- June 2025: ["The web could use machine code"](https://probablymarcus.com/blocks/2025/06/08/the-web-could-use-machine-code.html)
+- April 2026: ["It's like a web view, but native"](https://probablymarcus.com/blocks/2026/04/28/like-a-web-view-but-native.html)
 
 
-## Performance demo
+## How to play with your own built outerframe
 
-A working performance demo is in the [MacPerfDemo](MacPerfDemo) folder. It shows how a proper outerframe would perform.
+Open [macOS/Outerframe.xcodeproj](macOS/Outerframe.xcodeproj) and build the target "Outer Frame". This is a simple browser built on the outerframe. You can now navigate this to arbitrary URLs hosting outerframe content.
 
-Feel free to run it yourself, but you shouldn't run it if you don't trust me (Marcus), or without first vetting the code. The app currently runs unsandboxed, for boring reasons. (I still need to figure out how to send mach ports between processes in a sandbox.)
+Example outerframe content:
+- Run [Top](https://github.com/outergroup/top) backend
+  - If you run it on a remote machine, use port forwarding, or use [Outer Loop](https://outerloop.sh)
+- Clone [hello-macOS-outerframe](https://github.com/outergroup/hello-macOS-outerframe) and vibe-code something for yourself.
+- Play with an early [outerframe-cookbook](https://github.com/outergroup/outerframe-cookbook)
 
-To keep this focused, I don't actually let this perf demo run external code. The app does render visualizations in a background process, but the visualization code is packaged into this project.
 
-To see the demos, build the app in Xcode, then navigate the app to:
-- https://probablymarcus.com/stuff/intro.outerdoc
-- https://probablymarcus.com/stuff/distributions.outerdoc
-- https://probablymarcus.com/stuff/distributions-1d.outerdoc
-- https://probablymarcus.com/stuff/numbers.outerdoc
-- https://probablymarcus.com/stuff/checkerboard.outerdoc
-- https://probablymarcus.com/stuff/sine.outerdoc
+## How to use an outerframe in your own project
+
+To use this, add [macOS/Outerframe.xcodeproj](macOS/Outerframe.xcodeproj) to your own Xcode project. Use [macOS/Browser](macOS/Browser) as example code. The key components for hosts are the `OuterframeView` and the network proxy.

@@ -5,11 +5,6 @@ let OuterframeContentSocketHeaderLength = MemoryLayout<UInt8>.size + MemoryLayou
 
 // MARK: - Content Messages (Browser ↔ Content)
 
-enum ContentShape {
-    case rectangle(width: CGFloat, height: CGFloat)
-    case contentWithHeader(totalWidth: CGFloat, totalHeight: CGFloat, headerHeight: CGFloat)
-}
-
 struct InitializeContentProxy {
     var host: String
     var port: UInt16
@@ -19,7 +14,8 @@ struct InitializeContentProxy {
 
 struct InitializeContentArguments {
     var data: Data?
-    var contentShape: ContentShape?
+    var contentWidth: CGFloat?
+    var contentHeight: CGFloat?
     var appearance: NSAppearance?
     var proxy: InitializeContentProxy?
     var url: String?
@@ -27,14 +23,16 @@ struct InitializeContentArguments {
     var windowIsActive: Bool?
 
     init(data: Data? = nil,
-         contentShape: ContentShape? = nil,
+         contentWidth: CGFloat? = nil,
+         contentHeight: CGFloat? = nil,
          appearance: NSAppearance? = nil,
          proxy: InitializeContentProxy? = nil,
          url: String? = nil,
          bundleUrl: String? = nil,
          windowIsActive: Bool? = nil) {
         self.data = data
-        self.contentShape = contentShape
+        self.contentWidth = contentWidth
+        self.contentHeight = contentHeight
         self.appearance = appearance
         self.proxy = proxy
         self.url = url
@@ -45,18 +43,13 @@ struct InitializeContentArguments {
 
 fileprivate enum InitArgKind: UInt8 {
     case data = 1
-    case contentShape = 2
+    case contentSize = 2
     case appearance = 3
     case proxy = 4
     case proxyAuth = 5
     case url = 6
     case bundleUrl = 7
     case windowIsActive = 8
-}
-
-fileprivate enum ContentShapeKind: UInt8 {
-    case rectangle = 1
-    case contentWithHeader = 2
 }
 
 /// Messages from Browser to Content on the content socket
@@ -118,7 +111,6 @@ enum BrowserToContentMessage {
     case copySelectedPasteboardRequest(requestId: UUID)
     case pasteboardContentDelivered(items: [OuterframeContentPasteboardItem])
     case accessibilitySnapshotRequest(requestId: UUID)
-    case headerMetricsUpdate(headerHeight: CGFloat)
     case shutdown
 
     func encode() throws -> Data {
@@ -132,20 +124,12 @@ enum BrowserToContentMessage {
                 encodedArguments.append((kind: .data, payload: argPayload))
             }
 
-            if let contentShape = arguments.contentShape {
+            if let contentWidth = arguments.contentWidth,
+               let contentHeight = arguments.contentHeight {
                 var argPayload = Data()
-                switch contentShape {
-                case .rectangle(let width, let height):
-                    argPayload.append(uint8: ContentShapeKind.rectangle.rawValue)
-                    argPayload.append(float64: width)
-                    argPayload.append(float64: height)
-                case .contentWithHeader(let totalWidth, let totalHeight, let headerHeight):
-                    argPayload.append(uint8: ContentShapeKind.contentWithHeader.rawValue)
-                    argPayload.append(float64: totalWidth)
-                    argPayload.append(float64: totalHeight)
-                    argPayload.append(float64: headerHeight)
-                }
-                encodedArguments.append((kind: .contentShape, payload: argPayload))
+                argPayload.append(float64: contentWidth)
+                argPayload.append(float64: contentHeight)
+                encodedArguments.append((kind: .contentSize, payload: argPayload))
             }
 
             if let appearance = arguments.appearance {
@@ -395,11 +379,6 @@ enum BrowserToContentMessage {
             payload.append(uuid: requestId)
             return makeBrowserToContentFrame(type: .accessibilitySnapshotRequest, payload: payload)
 
-        case .headerMetricsUpdate(let headerHeight):
-            var payload = Data(capacity: 8)
-            payload.append(float64: headerHeight)
-            return makeBrowserToContentFrame(type: .headerMetricsUpdate, payload: payload)
-
         case .shutdown:
             return makeBrowserToContentFrame(type: .shutdown, payload: Data())
         }
@@ -441,29 +420,13 @@ enum BrowserToContentMessage {
                     }
                     arguments.data = data
 
-                case .contentShape:
-                    guard let shapeKindRaw = argCursor.readUInt8(),
-                          let shapeKind = ContentShapeKind(rawValue: shapeKindRaw) else {
+                case .contentSize:
+                    guard let width = argCursor.readFloat64(),
+                          let height = argCursor.readFloat64() else {
                         throw OuterframeContentSocketMessageError.truncatedPayload
                     }
-                    switch shapeKind {
-                    case .rectangle:
-                        guard let width = argCursor.readFloat64(),
-                              let height = argCursor.readFloat64() else {
-                            throw OuterframeContentSocketMessageError.truncatedPayload
-                        }
-                        arguments.contentShape = .rectangle(width: width, height: height)
-                    case .contentWithHeader:
-                        guard let totalWidth = argCursor.readFloat64(),
-                              let totalHeight = argCursor.readFloat64(),
-                              let headerHeight = argCursor.readFloat64() else {
-                            throw OuterframeContentSocketMessageError.truncatedPayload
-                        }
-                        arguments.contentShape = .contentWithHeader(
-                            totalWidth: totalWidth,
-                            totalHeight: totalHeight,
-                            headerHeight: headerHeight)
-                    }
+                    arguments.contentWidth = width
+                    arguments.contentHeight = height
 
                 case .appearance:
                     guard let appearanceData = argCursor.readData32(),
@@ -770,12 +733,6 @@ enum BrowserToContentMessage {
                 throw OuterframeContentSocketMessageError.truncatedPayload
             }
             return .accessibilitySnapshotRequest(requestId: requestId)
-
-        case .headerMetricsUpdate:
-            guard let headerHeight = cursor.readFloat64() else {
-                throw OuterframeContentSocketMessageError.truncatedPayload
-            }
-            return .headerMetricsUpdate(headerHeight: headerHeight)
 
         case .shutdown:
             return .shutdown
@@ -1281,7 +1238,6 @@ private enum BrowserToContentMessageKind: UInt8 {
     case pasteboardContentDelivered = 45
     case accessibilitySnapshotRequest = 46
     case shutdown = 51
-    case headerMetricsUpdate = 52
 }
 
 private enum ContentToBrowserMessageKind: UInt8 {

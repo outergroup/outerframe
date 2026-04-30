@@ -374,8 +374,6 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
     private var shouldRunDisplayLink = false
     private var windowIsActive = false
 
-    public var headerHeight: CGFloat = 0
-
     var currentInputMode: OuterframeContentInputMode = .rawKeys
 
     public static let outerframeMimeType = "application/vnd.outerframe"
@@ -1232,6 +1230,7 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
         super.setFrameSize(newSize)
 
         if oldSize != newSize {
+            layerHost?.frame = bounds
             notifySizeChanged()
         }
     }
@@ -1880,8 +1879,7 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
                                             outerURLString: outerURLString,
                                             bundleURLString: bundleURLString,
                                             width: width,
-                                            height: height,
-                                            headerHeight: headerHeight)
+                                            height: height)
         }
     }
 
@@ -2222,8 +2220,7 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
                                                 outerURLString: outerURLString,
                                                 bundleURLString: bundleURLString,
                                                 width: width,
-                                                height: height,
-                                                headerHeight: self.headerHeight)
+                                                height: height)
                 continuation?.resume(returning: ())
             } catch {
                 continuation?.resume(throwing: error)
@@ -2309,10 +2306,6 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
         }
         windowIsActive = isActive
         outerframeContentConnection?.sendWindowActiveState(isActive: windowIsActive)
-    }
-
-    public func updateHeaderMetrics(headerHeight: CGFloat) {
-        outerframeContentConnection?.sendHeaderMetrics(headerHeight: headerHeight)
     }
 
     @objc private func displayLinkCallback(_ displayLink: CADisplayLink) {

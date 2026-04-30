@@ -498,8 +498,7 @@ final class OuterframeContentConnection: NSObject {
                     outerURLString: String,
                     bundleURLString: String,
                     width: CGFloat,
-                    height: CGFloat,
-                    headerHeight: CGFloat = 0) async throws {
+                    height: CGFloat) async throws {
         let requestId = UUID()
 
         let proxyHost: String?
@@ -522,11 +521,8 @@ final class OuterframeContentConnection: NSObject {
 
         let initializeContentArguments = InitializeContentArguments(
             data: data,
-            contentShape: .contentWithHeader(
-                totalWidth: width,
-                totalHeight: height,
-                headerHeight: headerHeight
-            ),
+            contentWidth: width,
+            contentHeight: height,
             appearance: NSApp.effectiveAppearance,
             proxy: proxy,
             url: outerURLString,
@@ -798,18 +794,6 @@ final class OuterframeContentConnection: NSObject {
                 try await pluginSocket.send(message.encode())
             } catch {
                 print("Browser: Failed to send viewFocusChanged message: \(error)")
-            }
-        }
-    }
-
-    func sendHeaderMetrics(headerHeight: CGFloat) {
-        let message = BrowserToContentMessage.headerMetricsUpdate(headerHeight: headerHeight)
-        let pluginSocket = self.pluginSocket
-        Task {
-            do {
-                try await pluginSocket.send(message.encode())
-            } catch {
-                print("Browser: Failed to send headerMetricsUpdate message: \(error)")
             }
         }
     }

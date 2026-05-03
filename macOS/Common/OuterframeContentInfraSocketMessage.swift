@@ -1,7 +1,7 @@
 import Foundation
 import AppKit.NSAppearance
 
-let OuterframeContentInfraSocketHeaderLength = MemoryLayout<UInt8>.size + MemoryLayout<UInt32>.size
+let OuterframeContentInfraSocketHeaderLength = MemoryLayout<UInt16>.size + MemoryLayout<UInt32>.size
 
 // MARK: - Infrastructure Messages (Browser ↔ OuterframeContent)
 
@@ -33,7 +33,7 @@ enum BrowserToContentInfraMessage {
         }
     }
 
-    static func decode(typeRaw: UInt8, payload: Data) throws -> BrowserToContentInfraMessage {
+    static func decode(typeRaw: UInt16, payload: Data) throws -> BrowserToContentInfraMessage {
         guard let type = BrowserToContentInfraMessageKind(rawValue: typeRaw) else {
             throw OuterframeContentInfraSocketMessageError.unknownType(typeRaw)
         }
@@ -98,7 +98,7 @@ enum ContentToBrowserInfraMessage {
         }
     }
 
-    static func decode(typeRaw: UInt8, payload: Data) throws -> ContentToBrowserInfraMessage {
+    static func decode(typeRaw: UInt16, payload: Data) throws -> ContentToBrowserInfraMessage {
         guard let type = ContentToBrowserInfraMessageKind(rawValue: typeRaw) else {
             throw OuterframeContentInfraSocketMessageError.unknownType(typeRaw)
         }
@@ -136,21 +136,21 @@ enum ContentToBrowserInfraMessage {
 }
 
 enum OuterframeContentInfraSocketMessageError: Error {
-    case unknownType(UInt8)
+    case unknownType(UInt16)
     case truncatedPayload
     case encodingFailure(String)
 }
 
 // MARK: - Message Kind Enums
 
-private enum BrowserToContentInfraMessageKind: UInt8 {
+private enum BrowserToContentInfraMessageKind: UInt16 {
     case loadPluginRequest = 3
     case unloadPluginRequest = 6
     case setDebuggerAttachmentMonitoring = 48
     case shutdown = 49
 }
 
-private enum ContentToBrowserInfraMessageKind: UInt8 {
+private enum ContentToBrowserInfraMessageKind: UInt16 {
     case loadPluginSuccess = 4
     case loadPluginFailure = 5
     case pluginLoaded = 19
@@ -163,7 +163,7 @@ private enum ContentToBrowserInfraMessageKind: UInt8 {
 
 private func makeBrowserToContentInfraFrame(type: BrowserToContentInfraMessageKind, payload: Data) -> Data {
     var frame = Data(capacity: OuterframeContentInfraSocketHeaderLength + payload.count)
-    frame.append(type.rawValue)
+    frame.append(uint16: type.rawValue)
     frame.append(uint32: UInt32(payload.count))
     frame.append(payload)
     return frame
@@ -171,7 +171,7 @@ private func makeBrowserToContentInfraFrame(type: BrowserToContentInfraMessageKi
 
 private func makeContentToBrowserInfraFrame(type: ContentToBrowserInfraMessageKind, payload: Data) -> Data {
     var frame = Data(capacity: OuterframeContentInfraSocketHeaderLength + payload.count)
-    frame.append(type.rawValue)
+    frame.append(uint16: type.rawValue)
     frame.append(uint32: UInt32(payload.count))
     frame.append(payload)
     return frame
@@ -190,14 +190,18 @@ private struct DataCursor {
 
     mutating func readUInt32() -> UInt32? {
         guard offset + 4 <= data.count else { return nil }
-        let value = data[offset..<(offset + 4)].reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+        let value = data[offset..<(offset + 4)].enumerated().reduce(UInt32(0)) {
+            $0 | (UInt32($1.element) << (8 * $1.offset))
+        }
         offset += 4
         return value
     }
 
     mutating func readUInt16() -> UInt16? {
         guard offset + 2 <= data.count else { return nil }
-        let value = data[offset..<(offset + 2)].reduce(UInt16(0)) { ($0 << 8) | UInt16($1) }
+        let value = data[offset..<(offset + 2)].enumerated().reduce(UInt16(0)) {
+            $0 | (UInt16($1.element) << (8 * $1.offset))
+        }
         offset += 2
         return value
     }
@@ -211,7 +215,9 @@ private struct DataCursor {
 
     mutating func readUInt64() -> UInt64? {
         guard offset + 8 <= data.count else { return nil }
-        let value = data[offset..<(offset + 8)].reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+        let value = data[offset..<(offset + 8)].enumerated().reduce(UInt64(0)) {
+            $0 | (UInt64($1.element) << (8 * $1.offset))
+        }
         offset += 8
         return value
     }
@@ -256,18 +262,18 @@ private struct DataCursor {
 
 fileprivate extension Data {
     mutating func append(uint32 value: UInt32) {
-        var be = value.bigEndian
-        Swift.withUnsafeBytes(of: &be) { append(contentsOf: $0) }
+        var le = value.littleEndian
+        Swift.withUnsafeBytes(of: &le) { append(contentsOf: $0) }
     }
 
     mutating func append(int32 value: Int32) {
-        var be = value.bigEndian
-        Swift.withUnsafeBytes(of: &be) { append(contentsOf: $0) }
+        var le = value.littleEndian
+        Swift.withUnsafeBytes(of: &le) { append(contentsOf: $0) }
     }
 
     mutating func append(uint16 value: UInt16) {
-        var be = value.bigEndian
-        Swift.withUnsafeBytes(of: &be) { append(contentsOf: $0) }
+        var le = value.littleEndian
+        Swift.withUnsafeBytes(of: &le) { append(contentsOf: $0) }
     }
 
     mutating func append(uint8 value: UInt8) {
@@ -275,8 +281,8 @@ fileprivate extension Data {
     }
 
     mutating func append(uint64 value: UInt64) {
-        var be = value.bigEndian
-        Swift.withUnsafeBytes(of: &be) { append(contentsOf: $0) }
+        var le = value.littleEndian
+        Swift.withUnsafeBytes(of: &le) { append(contentsOf: $0) }
     }
 
     mutating func append(float64 value: Double) {

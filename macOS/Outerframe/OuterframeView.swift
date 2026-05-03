@@ -1968,23 +1968,31 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
             throw OuterframeLoadError.unexpectedHTTPStatus(httpResponse.statusCode)
         }
 
-        guard data.count >= 3 else {
+        let outerframeMagic = Data("OUTR".utf8)
+        guard data.count >= outerframeMagic.count + 3 else {
             throw OuterframeLoadError.invalidOuterframeData
         }
 
-        let formatVersion = data[0]
+        guard data.prefix(outerframeMagic.count) == outerframeMagic else {
+            throw OuterframeLoadError.invalidOuterframeData
+        }
+
+        let headerStart = outerframeMagic.count
+        let formatVersion = data[headerStart]
         guard formatVersion == 0 else {
             throw OuterframeLoadError.invalidOuterframeData
         }
 
-        let pathLength = UInt16(data[1]) << 8 | UInt16(data[2])
-        let contentBlobStart = 3 + Int(pathLength)
+        let pathLengthOffset = headerStart + 1
+        let pathLength = UInt16(data[pathLengthOffset]) | (UInt16(data[pathLengthOffset + 1]) << 8)
+        let pathDataStart = pathLengthOffset + MemoryLayout<UInt16>.size
+        let contentBlobStart = pathDataStart + Int(pathLength)
 
         guard data.count >= contentBlobStart else {
             throw OuterframeLoadError.invalidPathLength
         }
 
-        let pathData = data.subdata(in: 3..<contentBlobStart)
+        let pathData = data.subdata(in: pathDataStart..<contentBlobStart)
         guard let remotePath = String(data: pathData, encoding: .utf8) else {
             throw OuterframeLoadError.invalidRemotePath
         }

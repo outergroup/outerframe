@@ -212,7 +212,7 @@ private struct AccessibilityDataCursor {
         let byte0 = UInt16(data[offset])
         let byte1 = UInt16(data[offset + 1])
         offset += 2
-        return (byte0 << 8) | byte1
+        return byte0 | (byte1 << 8)
     }
 
     mutating func readUInt32() -> UInt32? {
@@ -222,7 +222,7 @@ private struct AccessibilityDataCursor {
         let b2 = UInt32(data[offset + 2])
         let b3 = UInt32(data[offset + 3])
         offset += 4
-        return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+        return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
     }
 
     mutating func readFloat32() -> Float32? {
@@ -260,13 +260,13 @@ private extension Data {
     }
 
     mutating func appendUInt16(_ value: UInt16) {
-        var be = value.bigEndian
-        Swift.withUnsafeBytes(of: &be) { append(contentsOf: $0) }
+        var le = value.littleEndian
+        Swift.withUnsafeBytes(of: &le) { append(contentsOf: $0) }
     }
 
     mutating func appendUInt32(_ value: UInt32) {
-        var be = value.bigEndian
-        Swift.withUnsafeBytes(of: &be) { append(contentsOf: $0) }
+        var le = value.littleEndian
+        Swift.withUnsafeBytes(of: &le) { append(contentsOf: $0) }
     }
 
     mutating func appendFloat32(_ value: Float32) {

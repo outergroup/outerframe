@@ -1156,7 +1156,7 @@ final class OuterframeContentConnection: NSObject {
 }
 
 extension OuterframeContentConnection: OuterframeContentSocketDelegate {
-    @MainActor func outerframeContentSocket(_ socket: OuterframeContentSocket, didReceiveMessageType typeRaw: UInt8, payload: Data) {
+    @MainActor func outerframeContentSocket(_ socket: OuterframeContentSocket, didReceiveMessageType typeRaw: UInt16, payload: Data) {
         if !socketReady {
             socketReady = true
         }
@@ -1169,7 +1169,7 @@ extension OuterframeContentConnection: OuterframeContentSocketDelegate {
         }
     }
 
-    private func handleInfrastructureMessage(typeRaw: UInt8, payload: Data) {
+    private func handleInfrastructureMessage(typeRaw: UInt16, payload: Data) {
         let message: ContentToBrowserInfraMessage
         do {
             message = try ContentToBrowserInfraMessage.decode(typeRaw: typeRaw, payload: payload)
@@ -1210,7 +1210,7 @@ extension OuterframeContentConnection: OuterframeContentSocketDelegate {
         }
     }
 
-    private func handlePluginMessage(typeRaw: UInt8, payload: Data) {
+    private func handlePluginMessage(typeRaw: UInt16, payload: Data) {
         let message: ContentToBrowserMessage
         do {
             message = try ContentToBrowserMessage.decode(typeRaw: typeRaw, payload: payload)

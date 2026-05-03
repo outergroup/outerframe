@@ -4,7 +4,7 @@ import Darwin
 
 @MainActor
 protocol OuterframeContentSocketDelegate: AnyObject, Sendable {
-    func outerframeContentSocket(_ socket: OuterframeContentSocket, didReceiveMessageType typeRaw: UInt8, payload: Data)
+    func outerframeContentSocket(_ socket: OuterframeContentSocket, didReceiveMessageType typeRaw: UInt16, payload: Data)
     func outerframeContentSocketDidClose(_ socket: OuterframeContentSocket)
 }
 
@@ -183,11 +183,17 @@ actor OuterframeContentSocket {
 
     private func processIncomingBuffer() {
         while incomingBuffer.count >= OuterframeContentSocketHeaderLength {
-            let typeRaw = incomingBuffer[incomingBuffer.startIndex]
+            let typeRange = incomingBuffer.startIndex..<(incomingBuffer.startIndex + MemoryLayout<UInt16>.size)
+            let typeRaw = incomingBuffer[typeRange].enumerated().reduce(UInt16(0)) {
+                $0 | (UInt16($1.element) << (8 * $1.offset))
+            }
 
-            let lengthRange = (incomingBuffer.startIndex + 1)..<(incomingBuffer.startIndex + 1 + MemoryLayout<UInt32>.size)
+            let lengthStart = incomingBuffer.startIndex + MemoryLayout<UInt16>.size
+            let lengthRange = lengthStart..<(lengthStart + MemoryLayout<UInt32>.size)
             let lengthData = incomingBuffer.subdata(in: lengthRange)
-            let payloadLength = lengthData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+            let payloadLength = lengthData.enumerated().reduce(UInt32(0)) {
+                $0 | (UInt32($1.element) << (8 * $1.offset))
+            }
             let totalLength = OuterframeContentSocketHeaderLength + Int(payloadLength)
 
             guard incomingBuffer.count >= totalLength else { break }

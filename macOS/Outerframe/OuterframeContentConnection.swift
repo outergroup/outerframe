@@ -111,8 +111,6 @@ protocol OuterframeContentConnectionDelegate: AnyObject {
     func showPluginRequestedContextMenu(attributedText: NSAttributedString, at location: CGPoint)
     func showPluginRequestedDefinition(attributedText: NSAttributedString, at location: CGPoint)
     func handleTextCursorUpdate(cursors: [[String: Any]])
-    func handlePluginPageMetadataUpdate(title: String?, iconPNGData: Data?, iconWidth: UInt32, iconHeight: UInt32)
-    func handlePluginStartPageMetadataUpdate(title: String?, iconPNGData: Data?, iconWidth: UInt32, iconHeight: UInt32)
     func handleAccessibilityTreeChanged(notificationMask: UInt8)
     func handlePluginOpenNewWindow(urlString: String, displayString: String?, preferredSize: CGSize?)
     func setPasteboardCapabilities(canCopy: Bool, canCut: Bool, pasteboardTypeIdentifiers: [String])
@@ -1302,18 +1300,6 @@ extension OuterframeContentConnection: OuterframeContentSocketDelegate {
                 ]
             }
             delegate.handleTextCursorUpdate(cursors: converted)
-
-        case .pageMetadataUpdate(let title, let iconPNGData, let iconWidth, let iconHeight):
-            delegate?.handlePluginPageMetadataUpdate(title: title,
-                                                     iconPNGData: iconPNGData,
-                                                     iconWidth: iconWidth,
-                                                     iconHeight: iconHeight)
-
-        case .startPageMetadataUpdate(let title, let iconPNGData, let iconWidth, let iconHeight):
-            delegate?.handlePluginStartPageMetadataUpdate(title: title,
-                                                          iconPNGData: iconPNGData,
-                                                          iconWidth: iconWidth,
-                                                          iconHeight: iconHeight)
 
         case .copySelectedPasteboardResponse(let requestId, let items):
             if let completion = pendingCopyRequests.removeValue(forKey: requestId) {

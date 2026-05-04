@@ -2369,49 +2369,6 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
         updateTextCursors(cursors)
     }
 
-    public func handlePluginPageMetadataUpdate(title: String?, iconPNGData: Data?, iconWidth: UInt32, iconHeight: UInt32) {
-        var shouldUpdateIcon = false
-        var decodedIcon: NSImage? = nil
-
-        if let iconPNGData {
-            shouldUpdateIcon = true
-            if let image = NSImage(data: iconPNGData) {
-                if iconWidth > 0 && iconHeight > 0 {
-                    image.size = NSSize(width: CGFloat(iconWidth), height: CGFloat(iconHeight))
-                }
-                decodedIcon = image
-            }
-        }
-
-        if shouldUpdateIcon {
-            delegate?.outerframeView(self, didUpdateFavicon: decodedIcon)
-        }
-
-        delegate?.outerframeView(self, didUpdatePageTitle: title)
-    }
-
-    public func handlePluginStartPageMetadataUpdate(title: String?, iconPNGData: Data?, iconWidth: UInt32, iconHeight: UInt32) {
-        var renderedIcon: NSImage? = nil
-        var resolvedSize: CGSize? = nil
-
-        if let iconPNGData,
-           let image = NSImage(data: iconPNGData) {
-            if iconWidth > 0 && iconHeight > 0 {
-                let size = NSSize(width: CGFloat(iconWidth), height: CGFloat(iconHeight))
-                image.size = size
-                resolvedSize = size
-            } else {
-                resolvedSize = image.size
-            }
-            renderedIcon = image
-        }
-
-        let metadata = OuterframeStartPageMetadata(title: title,
-                                                   icon: renderedIcon,
-                                                   iconSize: resolvedSize ?? renderedIcon?.size)
-        delegate?.outerframeView(self, didUpdateStartPageMetadata: metadata)
-    }
-
     public func handlePluginOpenNewWindow(urlString: String, displayString: String?, preferredSize: CGSize?) {
         delegate?.outerframeView(self,
                                  didRequestOpenWindowWithURLString: urlString,

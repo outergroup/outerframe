@@ -758,8 +758,6 @@ enum ContentToBrowserMessage {
                                       tintBlue: Float32,
                                       tintAlpha: Float32)
     case textCursorUpdate(cursors: [OuterframeContentTextCursorSnapshot])
-    case pageMetadataUpdate(title: String?, iconPNGData: Data?, iconWidth: UInt32, iconHeight: UInt32)
-    case startPageMetadataUpdate(title: String?, iconPNGData: Data?, iconWidth: UInt32, iconHeight: UInt32)
     case copySelectedPasteboardResponse(requestId: UUID, items: [OuterframeContentPasteboardItem])
     case openNewWindow(url: String, displayString: String?, preferredWidth: Float32?, preferredHeight: Float32?)
     case setPasteboardCapabilities(canCopy: Bool, canCut: Bool, pasteboardTypes: [String])
@@ -830,42 +828,6 @@ enum ContentToBrowserMessage {
                 payload.append(uint8: cursor.visible ? 1 : 0)
             }
             return makeContentToBrowserFrame(type: .textCursorUpdate, payload: payload)
-
-        case .pageMetadataUpdate(let title, let iconPNGData, let iconWidth, let iconHeight):
-            var payload = Data()
-            if let title {
-                payload.append(uint8: 1)
-                try payload.append(lengthPrefixedUTF8_32: title)
-            } else {
-                payload.append(uint8: 0)
-            }
-            if let iconPNGData {
-                payload.append(uint8: 1)
-                payload.append(uint32: iconWidth)
-                payload.append(uint32: iconHeight)
-                try payload.append(lengthPrefixedData32: iconPNGData)
-            } else {
-                payload.append(uint8: 0)
-            }
-            return makeContentToBrowserFrame(type: .pageMetadataUpdate, payload: payload)
-
-        case .startPageMetadataUpdate(let title, let iconPNGData, let iconWidth, let iconHeight):
-            var payload = Data()
-            if let title {
-                payload.append(uint8: 1)
-                try payload.append(lengthPrefixedUTF8_32: title)
-            } else {
-                payload.append(uint8: 0)
-            }
-            if let iconPNGData {
-                payload.append(uint8: 1)
-                payload.append(uint32: iconWidth)
-                payload.append(uint32: iconHeight)
-                try payload.append(lengthPrefixedData32: iconPNGData)
-            } else {
-                payload.append(uint8: 0)
-            }
-            return makeContentToBrowserFrame(type: .startPageMetadataUpdate, payload: payload)
 
         case .copySelectedPasteboardResponse(let requestId, let items):
             var payload = Data()
@@ -1018,66 +980,6 @@ enum ContentToBrowserMessage {
                                                               visible: visibleRaw != 0))
             }
             return .textCursorUpdate(cursors: entries)
-
-        case .pageMetadataUpdate:
-            guard let hasTitleRaw = cursor.readUInt8() else {
-                throw OuterframeContentSocketMessageError.truncatedPayload
-            }
-            var title: String? = nil
-            if hasTitleRaw != 0 {
-                guard let value = cursor.readString32() else {
-                    throw OuterframeContentSocketMessageError.truncatedPayload
-                }
-                title = value
-            }
-            guard let hasIconRaw = cursor.readUInt8() else {
-                throw OuterframeContentSocketMessageError.truncatedPayload
-            }
-            var iconData: Data? = nil
-            var iconWidth: UInt32 = 0
-            var iconHeight: UInt32 = 0
-            if hasIconRaw != 0 {
-                guard let width = cursor.readUInt32(),
-                      let height = cursor.readUInt32(),
-                      let data = cursor.readData32() else {
-                    throw OuterframeContentSocketMessageError.truncatedPayload
-                }
-                iconWidth = width
-                iconHeight = height
-                iconData = data
-            }
-            return .pageMetadataUpdate(title: title, iconPNGData: iconData,
-                                       iconWidth: iconWidth, iconHeight: iconHeight)
-
-        case .startPageMetadataUpdate:
-            guard let hasTitleRaw = cursor.readUInt8() else {
-                throw OuterframeContentSocketMessageError.truncatedPayload
-            }
-            var title: String? = nil
-            if hasTitleRaw != 0 {
-                guard let value = cursor.readString32() else {
-                    throw OuterframeContentSocketMessageError.truncatedPayload
-                }
-                title = value
-            }
-            guard let hasIconRaw = cursor.readUInt8() else {
-                throw OuterframeContentSocketMessageError.truncatedPayload
-            }
-            var iconData: Data? = nil
-            var iconWidth: UInt32 = 0
-            var iconHeight: UInt32 = 0
-            if hasIconRaw != 0 {
-                guard let width = cursor.readUInt32(),
-                      let height = cursor.readUInt32(),
-                      let data = cursor.readData32() else {
-                    throw OuterframeContentSocketMessageError.truncatedPayload
-                }
-                iconWidth = width
-                iconHeight = height
-                iconData = data
-            }
-            return .startPageMetadataUpdate(title: title, iconPNGData: iconData,
-                                            iconWidth: iconWidth, iconHeight: iconHeight)
 
         case .copySelectedPasteboardResponse:
             guard let requestId = cursor.readUUID(),
@@ -1249,8 +1151,6 @@ private enum ContentToBrowserMessageKind: UInt16 {
     case showDefinition = 35
     case getImageWithSystemSymbolName = 36
     case textCursorUpdate = 37
-    case pageMetadataUpdate = 38
-    case startPageMetadataUpdate = 39
     case copySelectedPasteboardResponse = 40
     case openNewWindow = 41
     case editingCapabilitiesUpdate = 44

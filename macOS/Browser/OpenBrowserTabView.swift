@@ -600,21 +600,6 @@ extension OpenBrowserTabView: WKUIDelegate {
 }
 
 extension OpenBrowserTabView: OuterframeViewDelegate {
-    func outerframeView(_ view: OuterframeView, didUpdatePageTitle title: String?) {
-        self.title = title
-        delegate?.browserTab(self, didUpdateTitle: title)
-    }
-
-    func outerframeView(_ view: OuterframeView, didUpdateFavicon icon: NSImage?) {
-    }
-
-    func outerframeView(_ view: OuterframeView, didUpdateStartPageMetadata metadata: OuterframeStartPageMetadata) {
-        if let title = metadata.title {
-            self.title = title
-            delegate?.browserTab(self, didUpdateTitle: title)
-        }
-    }
-
     func outerframeView(_ view: OuterframeView,
                         didRequestOpenWindowWithURLString urlString: String,
                         displayString: String?,

@@ -102,9 +102,9 @@ enum BrowserToContentMessage {
                        replacementLocation: UInt64,
                        replacementLength: UInt64)
     case unmarkText
-    case textInputFocus(fieldId: String, hasFocus: Bool)
+    case textInputFocus(fieldID: UUID, hasFocus: Bool)
     case textCommand(command: String)
-    case setCursorPosition(fieldId: String, position: UInt64, modifySelection: Bool)
+    case setCursorPosition(fieldID: UUID, position: UInt64, modifySelection: Bool)
     case systemAppearanceUpdate(appearance: NSAppearance)
     case windowActiveUpdate(isActive: Bool)
     case viewFocusChanged(isFocused: Bool)
@@ -325,9 +325,9 @@ enum BrowserToContentMessage {
         case .unmarkText:
             return makeBrowserToContentFrame(type: .unmarkText, payload: Data())
 
-        case .textInputFocus(let fieldId, let hasFocus):
+        case .textInputFocus(let fieldID, let hasFocus):
             var payload = Data()
-            try payload.append(lengthPrefixedUTF8_32: fieldId)
+            payload.append(uuid: fieldID)
             payload.append(uint8: hasFocus ? 1 : 0)
             return makeBrowserToContentFrame(type: .textInputFocus, payload: payload)
 
@@ -336,9 +336,9 @@ enum BrowserToContentMessage {
             try payload.append(lengthPrefixedUTF8_32: command)
             return makeBrowserToContentFrame(type: .textCommand, payload: payload)
 
-        case .setCursorPosition(let fieldId, let position, let modifySelection):
+        case .setCursorPosition(let fieldID, let position, let modifySelection):
             var payload = Data()
-            try payload.append(lengthPrefixedUTF8_32: fieldId)
+            payload.append(uuid: fieldID)
             payload.append(uint64: position)
             payload.append(uint8: modifySelection ? 1 : 0)
             return makeBrowserToContentFrame(type: .setCursorPosition, payload: payload)
@@ -666,11 +666,11 @@ enum BrowserToContentMessage {
             return .unmarkText
 
         case .textInputFocus:
-            guard let fieldId = cursor.readString32(),
+            guard let fieldID = cursor.readUUID(),
                   let hasFocusRaw = cursor.readUInt8() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
             }
-            return .textInputFocus(fieldId: fieldId, hasFocus: hasFocusRaw != 0)
+            return .textInputFocus(fieldID: fieldID, hasFocus: hasFocusRaw != 0)
 
         case .textCommand:
             guard let command = cursor.readString32() else {
@@ -679,12 +679,12 @@ enum BrowserToContentMessage {
             return .textCommand(command: command)
 
         case .setCursorPosition:
-            guard let fieldId = cursor.readString32(),
+            guard let fieldID = cursor.readUUID(),
                   let position = cursor.readUInt64(),
                   let modifySelectionRaw = cursor.readUInt8() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
             }
-            return .setCursorPosition(fieldId: fieldId, position: position,
+            return .setCursorPosition(fieldID: fieldID, position: position,
                                       modifySelection: modifySelectionRaw != 0)
 
         case .systemAppearanceUpdate:
@@ -820,7 +820,7 @@ enum ContentToBrowserMessage {
             let countValue = UInt32(max(0, min(cursors.count, Int(UInt32.max))))
             payload.append(uint32: countValue)
             for cursor in cursors {
-                try payload.append(lengthPrefixedUTF8_32: cursor.fieldId)
+                payload.append(uuid: cursor.fieldID)
                 payload.append(float32: cursor.rectX)
                 payload.append(float32: cursor.rectY)
                 payload.append(float32: cursor.rectWidth)
@@ -966,7 +966,7 @@ enum ContentToBrowserMessage {
             var entries: [OuterframeContentTextCursorSnapshot] = []
             entries.reserveCapacity(Int(cursorCount))
             for _ in 0..<cursorCount {
-                guard let fieldId = cursor.readString32(),
+                guard let fieldID = cursor.readUUID(),
                       let rectX = cursor.readFloat32(),
                       let rectY = cursor.readFloat32(),
                       let rectWidth = cursor.readFloat32(),
@@ -974,7 +974,7 @@ enum ContentToBrowserMessage {
                       let visibleRaw = cursor.readUInt8() else {
                     throw OuterframeContentSocketMessageError.truncatedPayload
                 }
-                entries.append(OuterframeContentTextCursorSnapshot(fieldId: fieldId,
+                entries.append(OuterframeContentTextCursorSnapshot(fieldID: fieldID,
                                                               rectX: rectX, rectY: rectY,
                                                               rectWidth: rectWidth, rectHeight: rectHeight,
                                                               visible: visibleRaw != 0))
@@ -1079,7 +1079,7 @@ enum ContentToBrowserMessage {
 // MARK: - Supporting Types
 
 struct OuterframeContentTextCursorSnapshot: Sendable {
-    let fieldId: String
+    let fieldID: UUID
     let rectX: Float32
     let rectY: Float32
     let rectWidth: Float32

@@ -110,7 +110,7 @@ protocol OuterframeContentConnectionDelegate: AnyObject {
     func setInputMode(_ inputMode: OuterframeContentInputMode)
     func showPluginRequestedContextMenu(attributedText: NSAttributedString, at location: CGPoint)
     func showPluginRequestedDefinition(attributedText: NSAttributedString, at location: CGPoint)
-    func handleTextCursorUpdate(cursors: [[String: Any]])
+    func handleTextCursorUpdate(cursors: [OuterframeContentTextCursorSnapshot])
     func handleAccessibilityTreeChanged(notificationMask: UInt8)
     func handlePluginOpenNewWindow(urlString: String, displayString: String?, preferredSize: CGSize?)
     func setPasteboardCapabilities(canCopy: Bool, canCut: Bool, pasteboardTypeIdentifiers: [String])
@@ -862,8 +862,8 @@ final class OuterframeContentConnection: NSObject {
         }
     }
 
-    func sendTextInputFocus(fieldId: String, hasFocus: Bool) {
-        let message = BrowserToContentMessage.textInputFocus(fieldId: fieldId,
+    func sendTextInputFocus(fieldID: UUID, hasFocus: Bool) {
+        let message = BrowserToContentMessage.textInputFocus(fieldID: fieldID,
                                                                   hasFocus: hasFocus)
         let pluginSocket = self.pluginSocket
         Task {
@@ -946,8 +946,8 @@ final class OuterframeContentConnection: NSObject {
         }
     }
 
-    func sendSetCursorPosition(fieldId: String, position: UInt64, modifySelection: Bool) {
-        let message = BrowserToContentMessage.setCursorPosition(fieldId: fieldId,
+    func sendSetCursorPosition(fieldID: UUID, position: UInt64, modifySelection: Bool) {
+        let message = BrowserToContentMessage.setCursorPosition(fieldID: fieldID,
                                                                      position: position,
                                                                      modifySelection: modifySelection)
         let pluginSocket = self.pluginSocket
@@ -1289,17 +1289,7 @@ extension OuterframeContentConnection: OuterframeContentSocketDelegate {
 
         case .textCursorUpdate(let cursors):
             guard let delegate = delegate else { return }
-            let converted: [[String: Any]] = cursors.map { cursor in
-                [
-                    "fieldId": cursor.fieldId,
-                    "x": CGFloat(cursor.rectX),
-                    "y": CGFloat(cursor.rectY),
-                    "width": CGFloat(cursor.rectWidth),
-                    "height": CGFloat(cursor.rectHeight),
-                    "visible": cursor.visible
-                ]
-            }
-            delegate.handleTextCursorUpdate(cursors: converted)
+            delegate.handleTextCursorUpdate(cursors: cursors)
 
         case .copySelectedPasteboardResponse(let requestId, let items):
             if let completion = pendingCopyRequests.removeValue(forKey: requestId) {

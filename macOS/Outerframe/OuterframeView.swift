@@ -388,14 +388,14 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
     }()
 
     // Text input state
-    private var currentTextFieldId: String?
+    private var currentTextFieldID: UUID?
     private var currentText: String = ""
     private var textSelectedRange: NSRange = NSRange(location: 0, length: 0)
     private var markedText: NSAttributedString?
     private var textMarkedRange: NSRange = NSRange(location: NSNotFound, length: 0)
 
     // Text cursor indicators
-    private var textCursorIndicators: [String: NSTextInsertionIndicator] = [:]
+    private var textCursorIndicators: [UUID: NSTextInsertionIndicator] = [:]
     private var overlayScrollIndicators: [String: NSScroller] = [:]
 
     private let manualMagnificationSurfaceId = Int(UInt32.max)
@@ -512,6 +512,10 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
     public override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         outerframeContentConnection?.sendSystemAppearanceUpdate(force: false)
+        for indicator in textCursorIndicators.values {
+            indicator.color = .controlAccentColor
+            indicator.layer?.zPosition = 2
+        }
     }
 
     public override var isOpaque: Bool {
@@ -611,53 +615,53 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
 
     // MARK: - Text Cursor Management
 
-    func updateTextCursors(_ cursors: [[String: Any]]) {
-        // Remove existing cursor indicators that are not in the new list
-        var newFieldIds = Set<String>()
-        var firstVisibleFieldId: String?
+    func updateTextCursors(_ cursors: [OuterframeContentTextCursorSnapshot]) {
+        var newFieldIDs = Set<UUID>()
+        var firstVisibleFieldID: UUID?
         for cursor in cursors {
-            if let fieldId = cursor["fieldId"] as? String {
-                newFieldIds.insert(fieldId)
-            }
+            newFieldIDs.insert(cursor.fieldID)
         }
 
-        // Remove old indicators
-        for (fieldId, indicator) in textCursorIndicators {
-            if !newFieldIds.contains(fieldId) {
+        for (fieldID, indicator) in textCursorIndicators {
+            if !newFieldIDs.contains(fieldID) {
                 indicator.removeFromSuperview()
-                textCursorIndicators.removeValue(forKey: fieldId)
+                textCursorIndicators.removeValue(forKey: fieldID)
             }
         }
 
-        // Update or create indicators
         for cursor in cursors {
-            guard let fieldId = cursor["fieldId"] as? String,
-                  let x = cursor["x"] as? CGFloat,
-                  let y = cursor["y"] as? CGFloat,
-                  let width = cursor["width"] as? CGFloat,
-                  let height = cursor["height"] as? CGFloat,
-                  let visible = cursor["visible"] as? Bool else { continue }
+            let fieldID = cursor.fieldID
+            let x = CGFloat(cursor.rectX)
+            let y = CGFloat(cursor.rectY)
+            let width = CGFloat(cursor.rectWidth)
+            let height = CGFloat(cursor.rectHeight)
+            let visible = cursor.visible
 
             let indicator: NSTextInsertionIndicator
-            if let existingIndicator = textCursorIndicators[fieldId] {
+            if let existingIndicator = textCursorIndicators[fieldID] {
                 indicator = existingIndicator
             } else {
                 indicator = NSTextInsertionIndicator(frame: NSRect(x: x, y: y, width: width, height: height))
                 indicator.displayMode = .automatic
+                indicator.color = .controlAccentColor
+                indicator.wantsLayer = true
+                indicator.layer?.zPosition = 2
                 addSubview(indicator)
-                textCursorIndicators[fieldId] = indicator
+                textCursorIndicators[fieldID] = indicator
             }
 
-            // Update position and visibility
-            let flippedY = bounds.height - y - height  // Convert from top-left to bottom-left coordinate system
-            indicator.frame = NSRect(x: x, y: flippedY, width: width, height: height)
+            let backingScaleFactor = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+            let renderedX = (x * backingScaleFactor).rounded(.down) / backingScaleFactor
+            let renderedWidth = (width * backingScaleFactor).rounded(.up) / backingScaleFactor
+            let flippedY = bounds.height - y - height
+            indicator.frame = NSRect(x: renderedX, y: flippedY, width: renderedWidth, height: height)
             indicator.isHidden = !visible
-            if visible && firstVisibleFieldId == nil {
-                firstVisibleFieldId = fieldId
+            if visible && firstVisibleFieldID == nil {
+                firstVisibleFieldID = fieldID
             }
         }
 
-        currentTextFieldId = firstVisibleFieldId
+        currentTextFieldID = firstVisibleFieldID
         inputContext?.invalidateCharacterCoordinates()
     }
 
@@ -748,8 +752,8 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
 
             // Use the cursor indicator position if available
             var viewRect: NSRect
-            if let fieldId = currentTextFieldId,
-               let indicator = textCursorIndicators[fieldId],
+            if let fieldID = currentTextFieldID,
+               let indicator = textCursorIndicators[fieldID],
                !indicator.isHidden {
                 // Position IME just above the cursor indicator
                 viewRect = indicator.frame
@@ -2364,8 +2368,7 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
         handleAccessibilityTreeChanged(notifications: notifications)
     }
 
-    public func handleTextCursorUpdate(cursors: [[String: Any]]) {
-        // Forward cursor updates to the canvas view
+    func handleTextCursorUpdate(cursors: [OuterframeContentTextCursorSnapshot]) {
         updateTextCursors(cursors)
     }
 
@@ -2428,9 +2431,9 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
         }
     }
 
-    func sendTextInputFocus(fieldId: String, hasFocus: Bool) {
+    func sendTextInputFocus(fieldID: UUID, hasFocus: Bool) {
         withActivePluginConnection { connection in
-            connection.sendTextInputFocus(fieldId: fieldId, hasFocus: hasFocus)
+            connection.sendTextInputFocus(fieldID: fieldID, hasFocus: hasFocus)
         }
     }
 
@@ -2462,9 +2465,9 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
         }
     }
 
-    func sendSetCursorPosition(fieldId: String, position: Int, modifySelection: Bool) {
+    func sendSetCursorPosition(fieldID: UUID, position: Int, modifySelection: Bool) {
         withActivePluginConnection { connection in
-            connection.sendSetCursorPosition(fieldId: fieldId, position: UInt64(position), modifySelection: modifySelection)
+            connection.sendSetCursorPosition(fieldID: fieldID, position: UInt64(position), modifySelection: modifySelection)
         }
     }
 

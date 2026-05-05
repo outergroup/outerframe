@@ -56,7 +56,7 @@ fileprivate enum InitArgKind: UInt8 {
 enum BrowserToContentMessage {
     case initializeContent(args: InitializeContentArguments)
     case displayLinkFired(frameNumber: UInt64, targetTimestamp: Double)
-    case displayLinkCallbackRegistered(callbackId: UUID, browserCallbackId: UUID)
+    case displayLinkCallbackRegistered(callbackID: UUID, browserCallbackID: UUID)
     case resizeContent(width: CGFloat, height: CGFloat)
     case mouseEvent(kind: OuterframeContentMouseEventKind,
                     x: Float32,
@@ -82,10 +82,10 @@ enum BrowserToContentMessage {
                charactersIgnoringModifiers: String,
                modifierFlags: UInt64,
                isRepeat: Bool)
-    case magnification(surfaceId: UInt32, magnification: Float32, x: Float32, y: Float32, scrollX: Float32, scrollY: Float32)
-    case magnificationEnded(surfaceId: UInt32, magnification: Float32, x: Float32, y: Float32, scrollX: Float32, scrollY: Float32)
+    case magnification(surfaceID: UInt32, magnification: Float32, x: Float32, y: Float32, scrollX: Float32, scrollY: Float32)
+    case magnificationEnded(surfaceID: UInt32, magnification: Float32, x: Float32, y: Float32, scrollX: Float32, scrollY: Float32)
     case quickLook(x: Float32, y: Float32)
-    case imageWithSystemSymbolName(requestId: UUID,
+    case imageWithSystemSymbolName(requestID: UUID,
                                    imageData: Data?,
                                    width: UInt32,
                                    height: UInt32,
@@ -108,9 +108,9 @@ enum BrowserToContentMessage {
     case systemAppearanceUpdate(appearance: NSAppearance)
     case windowActiveUpdate(isActive: Bool)
     case viewFocusChanged(isFocused: Bool)
-    case copySelectedPasteboardRequest(requestId: UUID)
+    case copySelectedPasteboardRequest(requestID: UUID)
     case pasteboardContentDelivered(items: [OuterframeContentPasteboardItem])
-    case accessibilitySnapshotRequest(requestId: UUID)
+    case accessibilitySnapshotRequest(requestID: UUID)
     case shutdown
 
     func encode() throws -> Data {
@@ -198,10 +198,10 @@ enum BrowserToContentMessage {
             payload.append(float64: targetTimestamp)
             return makeBrowserToContentFrame(type: .displayLinkFired, payload: payload)
 
-        case .displayLinkCallbackRegistered(let callbackId, let browserCallbackId):
+        case .displayLinkCallbackRegistered(let callbackID, let browserCallbackID):
             var payload = Data(capacity: 16 * 2)
-            payload.append(uuid: callbackId)
-            payload.append(uuid: browserCallbackId)
+            payload.append(uuid: callbackID)
+            payload.append(uuid: browserCallbackID)
             return makeBrowserToContentFrame(type: .displayLinkCallbackRegistered, payload: payload)
 
         case .resizeContent(let width, let height):
@@ -258,9 +258,9 @@ enum BrowserToContentMessage {
             payload.append(uint8: isRepeat ? 1 : 0)
             return makeBrowserToContentFrame(type: .keyUp, payload: payload)
 
-        case .magnification(let surfaceId, let magnification, let x, let y, let scrollX, let scrollY):
+        case .magnification(let surfaceID, let magnification, let x, let y, let scrollX, let scrollY):
             var payload = Data()
-            payload.append(uint32: surfaceId)
+            payload.append(uint32: surfaceID)
             payload.append(float32: magnification)
             payload.append(float32: x)
             payload.append(float32: y)
@@ -268,9 +268,9 @@ enum BrowserToContentMessage {
             payload.append(float32: scrollY)
             return makeBrowserToContentFrame(type: .magnification, payload: payload)
 
-        case .magnificationEnded(let surfaceId, let magnification, let x, let y, let scrollX, let scrollY):
+        case .magnificationEnded(let surfaceID, let magnification, let x, let y, let scrollX, let scrollY):
             var payload = Data()
-            payload.append(uint32: surfaceId)
+            payload.append(uint32: surfaceID)
             payload.append(float32: magnification)
             payload.append(float32: x)
             payload.append(float32: y)
@@ -284,9 +284,9 @@ enum BrowserToContentMessage {
             payload.append(float32: y)
             return makeBrowserToContentFrame(type: .quickLook, payload: payload)
 
-        case .imageWithSystemSymbolName(let requestId, let imageData, let width, let height, let success, let errorMessage):
+        case .imageWithSystemSymbolName(let requestID, let imageData, let width, let height, let success, let errorMessage):
             var payload = Data()
-            payload.append(uuid: requestId)
+            payload.append(uuid: requestID)
             payload.append(uint32: width)
             payload.append(uint32: height)
             payload.append(uint8: success ? 1 : 0)
@@ -359,9 +359,9 @@ enum BrowserToContentMessage {
             payload.append(uint8: isFocused ? 1 : 0)
             return makeBrowserToContentFrame(type: .viewFocusChanged, payload: payload)
 
-        case .copySelectedPasteboardRequest(let requestId):
+        case .copySelectedPasteboardRequest(let requestID):
             var payload = Data(capacity: 16)
-            payload.append(uuid: requestId)
+            payload.append(uuid: requestID)
             return makeBrowserToContentFrame(type: .copySelectedPasteboardRequest, payload: payload)
 
         case .pasteboardContentDelivered(let items):
@@ -374,9 +374,9 @@ enum BrowserToContentMessage {
             }
             return makeBrowserToContentFrame(type: .pasteboardContentDelivered, payload: payload)
 
-        case .accessibilitySnapshotRequest(let requestId):
+        case .accessibilitySnapshotRequest(let requestID):
             var payload = Data(capacity: 16)
-            payload.append(uuid: requestId)
+            payload.append(uuid: requestID)
             return makeBrowserToContentFrame(type: .accessibilitySnapshotRequest, payload: payload)
 
         case .shutdown:
@@ -507,11 +507,11 @@ enum BrowserToContentMessage {
             return .displayLinkFired(frameNumber: frameNumber, targetTimestamp: timestamp)
 
         case .displayLinkCallbackRegistered:
-            guard let callbackId = cursor.readUUID(),
-                  let browserCallbackId = cursor.readUUID() else {
+            guard let callbackID = cursor.readUUID(),
+                  let browserCallbackID = cursor.readUUID() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
             }
-            return .displayLinkCallbackRegistered(callbackId: callbackId, browserCallbackId: browserCallbackId)
+            return .displayLinkCallbackRegistered(callbackID: callbackID, browserCallbackID: browserCallbackID)
 
         case .resizeContent:
             guard let width = cursor.readFloat64(),
@@ -573,7 +573,7 @@ enum BrowserToContentMessage {
                           modifierFlags: modifierFlags, isRepeat: repeatRaw != 0)
 
         case .magnification:
-            guard let surfaceId = cursor.readUInt32(),
+            guard let surfaceID = cursor.readUInt32(),
                   let magnification = cursor.readFloat32(),
                   let x = cursor.readFloat32(),
                   let y = cursor.readFloat32(),
@@ -581,11 +581,11 @@ enum BrowserToContentMessage {
                   let scrollY = cursor.readFloat32() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
             }
-            return .magnification(surfaceId: surfaceId, magnification: magnification,
+            return .magnification(surfaceID: surfaceID, magnification: magnification,
                                   x: x, y: y, scrollX: scrollX, scrollY: scrollY)
 
         case .magnificationEnded:
-            guard let surfaceId = cursor.readUInt32(),
+            guard let surfaceID = cursor.readUInt32(),
                   let magnification = cursor.readFloat32(),
                   let x = cursor.readFloat32(),
                   let y = cursor.readFloat32(),
@@ -593,7 +593,7 @@ enum BrowserToContentMessage {
                   let scrollY = cursor.readFloat32() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
             }
-            return .magnificationEnded(surfaceId: surfaceId, magnification: magnification,
+            return .magnificationEnded(surfaceID: surfaceID, magnification: magnification,
                                        x: x, y: y, scrollX: scrollX, scrollY: scrollY)
 
         case .quickLook:
@@ -604,7 +604,7 @@ enum BrowserToContentMessage {
             return .quickLook(x: x, y: y)
 
         case .imageWithSystemSymbolName:
-            guard let requestId = cursor.readUUID(),
+            guard let requestID = cursor.readUUID(),
                   let width = cursor.readUInt32(),
                   let height = cursor.readUInt32(),
                   let successRaw = cursor.readUInt8(),
@@ -632,7 +632,7 @@ enum BrowserToContentMessage {
                 errorMessage = message
             }
 
-            return .imageWithSystemSymbolName(requestId: requestId, imageData: imageData,
+            return .imageWithSystemSymbolName(requestID: requestID, imageData: imageData,
                                      width: width, height: height,
                                      success: successRaw != 0, errorMessage: errorMessage)
 
@@ -708,10 +708,10 @@ enum BrowserToContentMessage {
             return .viewFocusChanged(isFocused: raw != 0)
 
         case .copySelectedPasteboardRequest:
-            guard let requestId = cursor.readUUID() else {
+            guard let requestID = cursor.readUUID() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
             }
-            return .copySelectedPasteboardRequest(requestId: requestId)
+            return .copySelectedPasteboardRequest(requestID: requestID)
 
         case .pasteboardContentDelivered:
             guard let count = cursor.readUInt16() else {
@@ -729,10 +729,10 @@ enum BrowserToContentMessage {
             return .pasteboardContentDelivered(items: items)
 
         case .accessibilitySnapshotRequest:
-            guard let requestId = cursor.readUUID() else {
+            guard let requestID = cursor.readUUID() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
             }
-            return .accessibilitySnapshotRequest(requestId: requestId)
+            return .accessibilitySnapshotRequest(requestID: requestID)
 
         case .shutdown:
             return .shutdown
@@ -742,13 +742,13 @@ enum BrowserToContentMessage {
 
 /// Messages from Content to Browser on the content socket
 enum ContentToBrowserMessage {
-    case startDisplayLink(callbackId: UUID)
-    case stopDisplayLink(browserCallbackId: UUID)
+    case startDisplayLink(callbackID: UUID)
+    case stopDisplayLink(browserCallbackID: UUID)
     case cursorUpdate(cursorType: UInt8)
     case inputModeUpdate(inputMode: UInt8)
     case showContextMenu(attributedTextData: Data, locationX: Float32, locationY: Float32)
     case showDefinition(attributedTextData: Data, locationX: Float32, locationY: Float32)
-    case getImageWithSystemSymbolName(requestId: UUID,
+    case getImageWithSystemSymbolName(requestID: UUID,
                                       symbolName: String,
                                       pointSize: Float32,
                                       weight: String,
@@ -758,23 +758,23 @@ enum ContentToBrowserMessage {
                                       tintBlue: Float32,
                                       tintAlpha: Float32)
     case textCursorUpdate(cursors: [OuterframeContentTextCursorSnapshot])
-    case copySelectedPasteboardResponse(requestId: UUID, items: [OuterframeContentPasteboardItem])
+    case copySelectedPasteboardResponse(requestID: UUID, items: [OuterframeContentPasteboardItem])
     case openNewWindow(url: String, displayString: String?, preferredWidth: Float32?, preferredHeight: Float32?)
     case setPasteboardCapabilities(canCopy: Bool, canCut: Bool, pasteboardTypes: [String])
-    case accessibilitySnapshotResponse(requestId: UUID, snapshotData: Data?)
+    case accessibilitySnapshotResponse(requestID: UUID, snapshotData: Data?)
     case accessibilityTreeChanged(notificationMask: UInt8)
     case hapticFeedback(style: UInt8)
 
     func encode() throws -> Data {
         switch self {
-        case .startDisplayLink(let callbackId):
+        case .startDisplayLink(let callbackID):
             var payload = Data(capacity: 16)
-            payload.append(uuid: callbackId)
+            payload.append(uuid: callbackID)
             return makeContentToBrowserFrame(type: .startDisplayLink, payload: payload)
 
-        case .stopDisplayLink(let browserCallbackId):
+        case .stopDisplayLink(let browserCallbackID):
             var payload = Data(capacity: 16)
-            payload.append(uuid: browserCallbackId)
+            payload.append(uuid: browserCallbackID)
             return makeContentToBrowserFrame(type: .stopDisplayLink, payload: payload)
 
         case .cursorUpdate(let cursorType):
@@ -801,10 +801,10 @@ enum ContentToBrowserMessage {
             try payload.append(lengthPrefixedData32: attributedTextData)
             return makeContentToBrowserFrame(type: .showDefinition, payload: payload)
 
-        case .getImageWithSystemSymbolName(let requestId, let symbolName, let pointSize, let weight,
+        case .getImageWithSystemSymbolName(let requestID, let symbolName, let pointSize, let weight,
                               let scale, let tintRed, let tintGreen, let tintBlue, let tintAlpha):
             var payload = Data()
-            payload.append(uuid: requestId)
+            payload.append(uuid: requestID)
             try payload.append(lengthPrefixedUTF8_32: symbolName)
             payload.append(float32: pointSize)
             try payload.append(lengthPrefixedUTF8_32: weight)
@@ -829,9 +829,9 @@ enum ContentToBrowserMessage {
             }
             return makeContentToBrowserFrame(type: .textCursorUpdate, payload: payload)
 
-        case .copySelectedPasteboardResponse(let requestId, let items):
+        case .copySelectedPasteboardResponse(let requestID, let items):
             var payload = Data()
-            payload.append(uuid: requestId)
+            payload.append(uuid: requestID)
             let clampedCount = UInt16(min(items.count, Int(UInt16.max)))
             payload.append(uint16: clampedCount)
             for item in items.prefix(Int(clampedCount)) {
@@ -869,9 +869,9 @@ enum ContentToBrowserMessage {
             }
             return makeContentToBrowserFrame(type: .editingCapabilitiesUpdate, payload: payload)
 
-        case .accessibilitySnapshotResponse(let requestId, let snapshotData):
+        case .accessibilitySnapshotResponse(let requestID, let snapshotData):
             var payload = Data()
-            payload.append(uuid: requestId)
+            payload.append(uuid: requestID)
             if let snapshotData {
                 payload.append(uint8: 1)
                 try payload.append(lengthPrefixedData32: snapshotData)
@@ -901,16 +901,16 @@ enum ContentToBrowserMessage {
 
         switch type {
         case .startDisplayLink:
-            guard let callbackId = cursor.readUUID() else {
+            guard let callbackID = cursor.readUUID() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
             }
-            return .startDisplayLink(callbackId: callbackId)
+            return .startDisplayLink(callbackID: callbackID)
 
         case .stopDisplayLink:
-            guard let browserCallbackId = cursor.readUUID() else {
+            guard let browserCallbackID = cursor.readUUID() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
             }
-            return .stopDisplayLink(browserCallbackId: browserCallbackId)
+            return .stopDisplayLink(browserCallbackID: browserCallbackID)
 
         case .cursorUpdate:
             guard let cursorType = cursor.readUInt8() else {
@@ -943,7 +943,7 @@ enum ContentToBrowserMessage {
                                    locationX: locationX, locationY: locationY)
 
         case .getImageWithSystemSymbolName:
-            guard let requestId = cursor.readUUID(),
+            guard let requestID = cursor.readUUID(),
                   let symbolName = cursor.readString32(),
                   let pointSize = cursor.readFloat32(),
                   let weight = cursor.readString32(),
@@ -954,7 +954,7 @@ enum ContentToBrowserMessage {
                   let tintAlpha = cursor.readFloat32() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
             }
-            return .getImageWithSystemSymbolName(requestId: requestId, symbolName: symbolName,
+            return .getImageWithSystemSymbolName(requestID: requestID, symbolName: symbolName,
                                     pointSize: pointSize, weight: weight, scale: scale,
                                     tintRed: tintRed, tintGreen: tintGreen,
                                     tintBlue: tintBlue, tintAlpha: tintAlpha)
@@ -982,7 +982,7 @@ enum ContentToBrowserMessage {
             return .textCursorUpdate(cursors: entries)
 
         case .copySelectedPasteboardResponse:
-            guard let requestId = cursor.readUUID(),
+            guard let requestID = cursor.readUUID(),
                   let count = cursor.readUInt16() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
             }
@@ -995,7 +995,7 @@ enum ContentToBrowserMessage {
                 }
                 items.append(OuterframeContentPasteboardItem(typeIdentifier: identifier, data: data))
             }
-            return .copySelectedPasteboardResponse(requestId: requestId, items: items)
+            return .copySelectedPasteboardResponse(requestID: requestID, items: items)
 
         case .editingCapabilitiesUpdate:
             guard let canCopyRaw = cursor.readUInt8(),
@@ -1016,7 +1016,7 @@ enum ContentToBrowserMessage {
                                               pasteboardTypes: identifiers)
 
         case .accessibilitySnapshotResponse:
-            guard let requestId = cursor.readUUID(),
+            guard let requestID = cursor.readUUID(),
                   let hasData = cursor.readUInt8() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
             }
@@ -1029,7 +1029,7 @@ enum ContentToBrowserMessage {
             } else {
                 snapshotData = nil
             }
-            return .accessibilitySnapshotResponse(requestId: requestId, snapshotData: snapshotData)
+            return .accessibilitySnapshotResponse(requestID: requestID, snapshotData: snapshotData)
 
         case .accessibilityTreeChanged:
             guard let mask = cursor.readUInt8() else {

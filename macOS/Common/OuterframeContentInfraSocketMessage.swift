@@ -7,16 +7,16 @@ let OuterframeContentInfraSocketHeaderLength = MemoryLayout<UInt16>.size + Memor
 
 /// Messages from Browser to OuterframeContent on the infrastructure socket
 enum BrowserToContentInfraMessage {
-    case loadPlugin(requestId: UUID, pluginURL: String)
+    case loadPlugin(requestID: UUID, pluginURL: String)
     case unloadPlugin
     case setDebuggerAttachmentMonitoring(isEnabled: Bool)
     case shutdown
 
     func encode() throws -> Data {
         switch self {
-        case .loadPlugin(let requestId, let pluginURL):
+        case .loadPlugin(let requestID, let pluginURL):
             var payload = Data()
-            payload.append(uuid: requestId)
+            payload.append(uuid: requestID)
             try payload.append(lengthPrefixedUTF8_32: pluginURL)
             return makeBrowserToContentInfraFrame(type: .loadPluginRequest, payload: payload)
 
@@ -42,11 +42,11 @@ enum BrowserToContentInfraMessage {
 
         switch type {
         case .loadPluginRequest:
-            guard let requestId = cursor.readUUID(),
+            guard let requestID = cursor.readUUID(),
                   let url = cursor.readString32() else {
                 throw OuterframeContentInfraSocketMessageError.truncatedPayload
             }
-            return .loadPlugin(requestId: requestId, pluginURL: url)
+            return .loadPlugin(requestID: requestID, pluginURL: url)
 
         case .unloadPluginRequest:
             return .unloadPlugin
@@ -65,28 +65,28 @@ enum BrowserToContentInfraMessage {
 
 /// Messages from OuterframeContent to Browser on the infrastructure socket
 enum ContentToBrowserInfraMessage {
-    case loadPluginSuccess(requestId: UUID)
-    case loadPluginFailure(requestId: UUID, errorMessage: String)
-    case pluginLoaded(contextId: UInt32, success: Bool)
+    case loadPluginSuccess(requestID: UUID)
+    case loadPluginFailure(requestID: UUID, errorMessage: String)
+    case pluginLoaded(contextID: UInt32, success: Bool)
     case pluginUnloaded
     case debuggerAttached
 
     func encode() throws -> Data {
         switch self {
-        case .loadPluginSuccess(let requestId):
+        case .loadPluginSuccess(let requestID):
             var payload = Data(capacity: 16)
-            payload.append(uuid: requestId)
+            payload.append(uuid: requestID)
             return makeContentToBrowserInfraFrame(type: .loadPluginSuccess, payload: payload)
 
-        case .loadPluginFailure(let requestId, let errorMessage):
+        case .loadPluginFailure(let requestID, let errorMessage):
             var payload = Data()
-            payload.append(uuid: requestId)
+            payload.append(uuid: requestID)
             try payload.append(lengthPrefixedUTF8_32: errorMessage)
             return makeContentToBrowserInfraFrame(type: .loadPluginFailure, payload: payload)
 
-        case .pluginLoaded(let contextId, let success):
+        case .pluginLoaded(let contextID, let success):
             var payload = Data(capacity: 4 + 1)
-            payload.append(uint32: contextId)
+            payload.append(uint32: contextID)
             payload.append(uint8: success ? 1 : 0)
             return makeContentToBrowserInfraFrame(type: .pluginLoaded, payload: payload)
 
@@ -107,24 +107,24 @@ enum ContentToBrowserInfraMessage {
 
         switch type {
         case .loadPluginSuccess:
-            guard let requestId = cursor.readUUID() else {
+            guard let requestID = cursor.readUUID() else {
                 throw OuterframeContentInfraSocketMessageError.truncatedPayload
             }
-            return .loadPluginSuccess(requestId: requestId)
+            return .loadPluginSuccess(requestID: requestID)
 
         case .loadPluginFailure:
-            guard let requestId = cursor.readUUID(),
+            guard let requestID = cursor.readUUID(),
                   let message = cursor.readString32() else {
                 throw OuterframeContentInfraSocketMessageError.truncatedPayload
             }
-            return .loadPluginFailure(requestId: requestId, errorMessage: message)
+            return .loadPluginFailure(requestID: requestID, errorMessage: message)
 
         case .pluginLoaded:
-            guard let contextId = cursor.readUInt32(),
+            guard let contextID = cursor.readUInt32(),
                   let successRaw = cursor.readUInt8() else {
                 throw OuterframeContentInfraSocketMessageError.truncatedPayload
             }
-            return .pluginLoaded(contextId: contextId, success: successRaw != 0)
+            return .pluginLoaded(contextID: contextID, success: successRaw != 0)
 
         case .pluginUnloaded:
             return .pluginUnloaded

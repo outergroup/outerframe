@@ -1198,8 +1198,8 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
         self.showDefinition(for: attributedText, at: location)
     }
 
-    func updateWithContextId(_ contextId: CAContextID) {
-        print("CanvasView: updateWithContextId called with contextId: \(contextId)")
+    func updateWithContextID(_ contextID: CAContextID) {
+        print("CanvasView: updateWithContextID called with contextID: \(contextID)")
 
         // Ensure we have a layer
         resetAccessibilitySnapshot()
@@ -1214,7 +1214,7 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
         let layerHost2 = CALayerHost()
         layerHost = layerHost2
 
-        layerHost2.contextId = contextId
+        layerHost2.contextId = contextID
         layerHost2.frame = bounds
         layerHost2.zPosition = 1
 //        layerHost2.autoresizingMask = [CAAutoresizingMask.layerWidthSizable, CAAutoresizingMask.layerHeightSizable]
@@ -1537,14 +1537,14 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
         withActivePluginConnection { connection in
             let delta = event.magnification
             if delta != 0 {
-                connection.sendMagnification(surfaceId: manualMagnificationSurfaceId,
+                connection.sendMagnification(surfaceID: manualMagnificationSurfaceId,
                                              magnification: delta,
                                              location: point,
                                              scrollOffset: .zero)
             }
 
             if event.phase == .ended || event.phase == .cancelled {
-                connection.sendMagnificationEnded(surfaceId: manualMagnificationSurfaceId,
+                connection.sendMagnificationEnded(surfaceID: manualMagnificationSurfaceId,
                                                   magnification: 0,
                                                   location: point,
                                                   scrollOffset: .zero)
@@ -2253,21 +2253,21 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
 
 
     public func registerDisplayLinkCallback() -> UUID {
-        let callbackId = UUID()
+        let callbackID = UUID()
 
         displayLinkLock.lock()
-        activeDisplayLinkCallbacks[callbackId] = true
+        activeDisplayLinkCallbacks[callbackID] = true
         displayLinkLock.unlock()
 
         // Start the display link if it's not already running
         startDisplayLink()
 
-        return callbackId
+        return callbackID
     }
 
-    public func unregisterDisplayLinkCallback(_ callbackId: UUID) {
+    public func unregisterDisplayLinkCallback(_ callbackID: UUID) {
         displayLinkLock.lock()
-        activeDisplayLinkCallbacks.removeValue(forKey: callbackId)
+        activeDisplayLinkCallbacks.removeValue(forKey: callbackID)
         let isEmpty = activeDisplayLinkCallbacks.isEmpty
         displayLinkLock.unlock()
 
@@ -2344,13 +2344,13 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
         }
     }
 
-    public func handlePluginLoaded(contextId: CAContextID) {
+    public func handlePluginLoaded(contextID: CAContextID) {
         pluginIsReady = true
 
         // Update canvas with the plugin's context ID
         resetEditingCapabilities()
         resetAccessibilitySnapshot()
-        updateWithContextId(contextId)
+        updateWithContextID(contextID)
 
         // Make sure the canvas has focus for keyboard input
         window?.makeFirstResponder(self)

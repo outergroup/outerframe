@@ -35,7 +35,7 @@ class OuterlayerHost: NSObject {
         pluginContext = nil
     }
 
-    func handleLoadPlugin(requestId: UUID, pluginUrl: String) {
+    func handleLoadPlugin(requestID: UUID, pluginUrl: String) {
         let sendResponse: (@escaping () async throws -> Void) -> Void = { operation in
             Task { @MainActor in
                 do {
@@ -49,7 +49,7 @@ class OuterlayerHost: NSObject {
         let sendFailure: (String) -> Void = { error in
             let message = error.isEmpty ? "Unknown error" : error
             sendResponse {
-                try await self.socketToBrowser.send(ContentToBrowserInfraMessage.loadPluginFailure(requestId: requestId, errorMessage: message).encode())
+                try await self.socketToBrowser.send(ContentToBrowserInfraMessage.loadPluginFailure(requestID: requestID, errorMessage: message).encode())
             }
         }
 
@@ -112,7 +112,7 @@ class OuterlayerHost: NSObject {
 
         print("OuterframeContent: Plugin started successfully")
         sendResponse {
-            try await self.socketToBrowser.send(ContentToBrowserInfraMessage.loadPluginSuccess(requestId: requestId).encode())
+            try await self.socketToBrowser.send(ContentToBrowserInfraMessage.loadPluginSuccess(requestID: requestID).encode())
         }
     }
 
@@ -147,8 +147,8 @@ class OuterlayerHost: NSObject {
         }
 
         switch message {
-        case .loadPlugin(let requestId, let pluginURL):
-            handleLoadPlugin(requestId: requestId, pluginUrl: pluginURL)
+        case .loadPlugin(let requestID, let pluginURL):
+            handleLoadPlugin(requestID: requestID, pluginUrl: pluginURL)
         case .unloadPlugin:
             handleUnloadPlugin()
         case .setDebuggerAttachmentMonitoring(let isEnabled):
@@ -176,15 +176,15 @@ extension OuterlayerHost : OuterframeAppConnection {
         let conn = CGSMainConnectionID()
         guard let context = CAContext(cgsConnection: conn, options: [:]) else {
             print("OuterframeContent: Failed to create CAContext in registerLayer")
-            sendInfraMessage(.pluginLoaded(contextId: 0, success: false), context: "pluginLoaded (failure)")
+            sendInfraMessage(.pluginLoaded(contextID: 0, success: false), context: "pluginLoaded (failure)")
             return
         }
         context.layer = layer
-        let contextId = context.contextId
+        let contextID = context.contextId
 
         self.pluginContext = context
 
-        print("OuterframeContent: Layer registered, contextId: \(contextId)")
-        sendInfraMessage(.pluginLoaded(contextId: contextId, success: true), context: "pluginLoaded")
+        print("OuterframeContent: Layer registered, contextID: \(contextID)")
+        sendInfraMessage(.pluginLoaded(contextID: contextID, success: true), context: "pluginLoaded")
     }
 }

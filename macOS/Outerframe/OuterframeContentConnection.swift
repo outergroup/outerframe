@@ -104,8 +104,8 @@ struct OuterframeContentEditingCapabilities: Sendable {
 
 protocol OuterframeContentConnectionDelegate: AnyObject {
     func registerDisplayLinkCallback() -> UUID
-    func unregisterDisplayLinkCallback(_ callbackId: UUID)
-    func handlePluginLoaded(contextId: CAContextID)
+    func unregisterDisplayLinkCallback(_ callbackID: UUID)
+    func handlePluginLoaded(contextID: CAContextID)
     func updateCursor(_ cursorType: PluginCursorType)
     func setInputMode(_ inputMode: OuterframeContentInputMode)
     func showPluginRequestedContextMenu(attributedText: NSAttributedString, at location: CGPoint)
@@ -497,7 +497,7 @@ final class OuterframeContentConnection: NSObject {
                     bundleURLString: String,
                     width: CGFloat,
                     height: CGFloat) async throws {
-        let requestId = UUID()
+        let requestID = UUID()
 
         let proxyHost: String?
         if let port = networkProxyPort, port > 0 {
@@ -506,7 +506,7 @@ final class OuterframeContentConnection: NSObject {
             proxyHost = nil
         }
 
-        let infraMessage = BrowserToContentInfraMessage.loadPlugin(requestId: requestId,
+        let infraMessage = BrowserToContentInfraMessage.loadPlugin(requestID: requestID,
                                                                   pluginURL: url.absoluteString)
 
         var proxy: InitializeContentProxy?
@@ -530,7 +530,7 @@ final class OuterframeContentConnection: NSObject {
         let initializeContentMessage = BrowserToContentMessage.initializeContent(args: initializeContentArguments)
 
         try await withCheckedThrowingContinuation { continuation in
-            loadPluginContinuations[requestId] = continuation
+            loadPluginContinuations[requestID] = continuation
 
             Task { @MainActor in
                 do {
@@ -543,7 +543,7 @@ final class OuterframeContentConnection: NSObject {
                 } catch {
                     print("Browser: Failed to send loadPlugin messages: \(error)")
 
-                    if let continuation = loadPluginContinuations.removeValue(forKey: requestId) {
+                    if let continuation = loadPluginContinuations.removeValue(forKey: requestID) {
                         continuation.resume(throwing: OuterframeContentConnectionError.sendFailed(error))
                     }
                 }
@@ -685,12 +685,12 @@ final class OuterframeContentConnection: NSObject {
         }
     }
 
-    func sendMagnification(surfaceId: Int,
+    func sendMagnification(surfaceID: Int,
                            magnification delta: CGFloat,
                            location: CGPoint,
                            scrollOffset: CGPoint) {
-        precondition(surfaceId >= 0 && surfaceId <= Int(UInt32.max), "Surface identifier out of range")
-        let message = BrowserToContentMessage.magnification(surfaceId: UInt32(surfaceId),
+        precondition(surfaceID >= 0 && surfaceID <= Int(UInt32.max), "Surface identifier out of range")
+        let message = BrowserToContentMessage.magnification(surfaceID: UInt32(surfaceID),
                                                                  magnification: Float32(delta),
                                                                  x: Float32(location.x),
                                                                  y: Float32(location.y),
@@ -707,12 +707,12 @@ final class OuterframeContentConnection: NSObject {
         }
     }
 
-    func sendMagnificationEnded(surfaceId: Int,
+    func sendMagnificationEnded(surfaceID: Int,
                                 magnification delta: CGFloat,
                                 location: CGPoint,
                                 scrollOffset: CGPoint) {
-        precondition(surfaceId >= 0 && surfaceId <= Int(UInt32.max), "Surface identifier out of range")
-        let message = BrowserToContentMessage.magnificationEnded(surfaceId: UInt32(surfaceId),
+        precondition(surfaceID >= 0 && surfaceID <= Int(UInt32.max), "Surface identifier out of range")
+        let message = BrowserToContentMessage.magnificationEnded(surfaceID: UInt32(surfaceID),
                                                                       magnification: Float32(delta),
                                                                       x: Float32(location.x),
                                                                       y: Float32(location.y),
@@ -893,16 +893,16 @@ final class OuterframeContentConnection: NSObject {
             return
         }
 
-        let requestId = UUID()
-        pendingCopyRequests[requestId] = completion
-        let message = BrowserToContentMessage.copySelectedPasteboardRequest(requestId: requestId)
+        let requestID = UUID()
+        pendingCopyRequests[requestID] = completion
+        let message = BrowserToContentMessage.copySelectedPasteboardRequest(requestID: requestID)
         let pluginSocket = self.pluginSocket
         Task {
             do {
                 try await pluginSocket.send(message.encode())
             } catch {
                 print("Browser: Failed to send copySelectedPasteboardRequest message: \(error)")
-                if let pending = self.pendingCopyRequests.removeValue(forKey: requestId) {
+                if let pending = self.pendingCopyRequests.removeValue(forKey: requestID) {
                     pending(nil)
                 }
             }
@@ -915,9 +915,9 @@ final class OuterframeContentConnection: NSObject {
             return
         }
 
-        let requestId = UUID()
-        pendingAccessibilitySnapshotRequests[requestId] = completion
-        let message = BrowserToContentMessage.accessibilitySnapshotRequest(requestId: requestId)
+        let requestID = UUID()
+        pendingAccessibilitySnapshotRequests[requestID] = completion
+        let message = BrowserToContentMessage.accessibilitySnapshotRequest(requestID: requestID)
         let pluginSocket = self.pluginSocket
         Task { [weak self] in
             do {
@@ -926,7 +926,7 @@ final class OuterframeContentConnection: NSObject {
                 print("Browser: Failed to send accessibilitySnapshotRequest message: \(error)")
                 await MainActor.run {
                     guard let self else { return }
-                    if let pending = self.pendingAccessibilitySnapshotRequests.removeValue(forKey: requestId) {
+                    if let pending = self.pendingAccessibilitySnapshotRequests.removeValue(forKey: requestID) {
                         pending(nil)
                     }
                 }
@@ -992,10 +992,10 @@ final class OuterframeContentConnection: NSObject {
         }
     }
 
-    private func handleGetImageWithSystemSymbolName(requestId: UUID, symbolName: String, pointSize: Float, weight: String, scale: Float, tintRed: Float, tintGreen: Float, tintBlue: Float, tintAlpha: Float) {
+    private func handleGetImageWithSystemSymbolName(requestID: UUID, symbolName: String, pointSize: Float, weight: String, scale: Float, tintRed: Float, tintGreen: Float, tintBlue: Float, tintAlpha: Float) {
         // Create and configure the SF Symbol image
         guard let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil) else {
-            self.sendImageWithSystemSymbolNameResponse(requestId: requestId, imageData: nil, width: 0, height: 0, success: false, errorMessage: "Symbol '\(symbolName)' not found")
+            self.sendImageWithSystemSymbolNameResponse(requestID: requestID, imageData: nil, width: 0, height: 0, success: false, errorMessage: "Symbol '\(symbolName)' not found")
             return
         }
 
@@ -1016,7 +1016,7 @@ final class OuterframeContentConnection: NSObject {
 
         let config = NSImage.SymbolConfiguration(pointSize: CGFloat(pointSize), weight: symbolWeight)
         guard let configuredImage = image.withSymbolConfiguration(config) else {
-            self.sendImageWithSystemSymbolNameResponse(requestId: requestId, imageData: nil, width: 0, height: 0, success: false, errorMessage: "Failed to configure symbol")
+            self.sendImageWithSystemSymbolNameResponse(requestID: requestID, imageData: nil, width: 0, height: 0, success: false, errorMessage: "Failed to configure symbol")
             return
         }
 
@@ -1036,7 +1036,7 @@ final class OuterframeContentConnection: NSObject {
             bytesPerRow: 0,
             bitsPerPixel: 0
         ) else {
-            self.sendImageWithSystemSymbolNameResponse(requestId: requestId, imageData: nil, width: 0, height: 0, success: false, errorMessage: "Failed to create bitmap")
+            self.sendImageWithSystemSymbolNameResponse(requestID: requestID, imageData: nil, width: 0, height: 0, success: false, errorMessage: "Failed to create bitmap")
             return
         }
 
@@ -1059,16 +1059,16 @@ final class OuterframeContentConnection: NSObject {
 
         // Convert to PNG data
         guard let pngData = bitmapRep.representation(using: .png, properties: [:]) else {
-            self.sendImageWithSystemSymbolNameResponse(requestId: requestId, imageData: nil, width: 0, height: 0, success: false, errorMessage: "Failed to create PNG data")
+            self.sendImageWithSystemSymbolNameResponse(requestID: requestID, imageData: nil, width: 0, height: 0, success: false, errorMessage: "Failed to create PNG data")
             return
         }
 
         // Send response back to plugin
-        self.sendImageWithSystemSymbolNameResponse(requestId: requestId, imageData: pngData, width: UInt32(imageSize.width), height: UInt32(imageSize.height), success: true, errorMessage: nil)
+        self.sendImageWithSystemSymbolNameResponse(requestID: requestID, imageData: pngData, width: UInt32(imageSize.width), height: UInt32(imageSize.height), success: true, errorMessage: nil)
     }
 
-    private func sendImageWithSystemSymbolNameResponse(requestId: UUID, imageData: Data?, width: UInt32, height: UInt32, success: Bool, errorMessage: String?) {
-        let message = BrowserToContentMessage.imageWithSystemSymbolName(requestId: requestId,
+    private func sendImageWithSystemSymbolNameResponse(requestID: UUID, imageData: Data?, width: UInt32, height: UInt32, success: Bool, errorMessage: String?) {
+        let message = BrowserToContentMessage.imageWithSystemSymbolName(requestID: requestID,
                                                                              imageData: imageData,
                                                                              width: width,
                                                                              height: height,
@@ -1177,27 +1177,27 @@ extension OuterframeContentConnection: OuterframeContentSocketDelegate {
         }
 
         switch message {
-        case .loadPluginSuccess(let requestId):
-            guard let continuation = loadPluginContinuations.removeValue(forKey: requestId) else {
-                print("Browser: Received loadPluginSuccess for unknown request id \(requestId)")
+        case .loadPluginSuccess(let requestID):
+            guard let continuation = loadPluginContinuations.removeValue(forKey: requestID) else {
+                print("Browser: Received loadPluginSuccess for unknown request ID \(requestID)")
                 return
             }
             continuation.resume(returning: ())
 
-        case .loadPluginFailure(let requestId, let errorMessage):
+        case .loadPluginFailure(let requestID, let errorMessage):
             cancelPluginLoadedTimeout()
-            guard let continuation = loadPluginContinuations.removeValue(forKey: requestId) else {
-                print("Browser: Received loadPluginFailure for unknown request id \(requestId): \(errorMessage)")
+            guard let continuation = loadPluginContinuations.removeValue(forKey: requestID) else {
+                print("Browser: Received loadPluginFailure for unknown request ID \(requestID): \(errorMessage)")
                 return
             }
             continuation.resume(throwing: OuterframeContentConnectionError.pluginLoadFailed(errorMessage))
 
-        case .pluginLoaded(let contextId, let success):
+        case .pluginLoaded(let contextID, let success):
             cancelPluginLoadedTimeout()
-            print("Browser: Received pluginLoaded message - contextId: \(contextId), success: \(success)")
+            print("Browser: Received pluginLoaded message - contextID: \(contextID), success: \(success)")
             guard success else { return }
             guard let delegate = delegate else { return }
-            delegate.handlePluginLoaded(contextId: contextId)
+            delegate.handlePluginLoaded(contextID: contextID)
 
         case .pluginUnloaded:
             cancelPluginLoadedTimeout()
@@ -1218,10 +1218,10 @@ extension OuterframeContentConnection: OuterframeContentSocketDelegate {
         }
 
         switch message {
-        case .startDisplayLink(let callbackId):
+        case .startDisplayLink(let callbackID):
             guard let delegate = delegate else { return }
-            let browserCallbackId = delegate.registerDisplayLinkCallback()
-            let ack = BrowserToContentMessage.displayLinkCallbackRegistered(callbackId: callbackId, browserCallbackId: browserCallbackId)
+            let browserCallbackID = delegate.registerDisplayLinkCallback()
+            let ack = BrowserToContentMessage.displayLinkCallbackRegistered(callbackID: callbackID, browserCallbackID: browserCallbackID)
             Task {
                 do {
                     try await self.pluginSocket.send(ack.encode())
@@ -1230,8 +1230,8 @@ extension OuterframeContentConnection: OuterframeContentSocketDelegate {
                 }
             }
 
-        case .stopDisplayLink(let browserCallbackId):
-            delegate?.unregisterDisplayLinkCallback(browserCallbackId)
+        case .stopDisplayLink(let browserCallbackID):
+            delegate?.unregisterDisplayLinkCallback(browserCallbackID)
 
         case .cursorUpdate(let cursorType):
             guard let delegate,
@@ -1268,7 +1268,7 @@ extension OuterframeContentConnection: OuterframeContentSocketDelegate {
             }
             delegate.performHapticFeedback(feedbackStyle)
 
-        case .getImageWithSystemSymbolName(let requestId,
+        case .getImageWithSystemSymbolName(let requestID,
                                            let symbolName,
                                            let pointSize,
                                            let weight,
@@ -1277,7 +1277,7 @@ extension OuterframeContentConnection: OuterframeContentSocketDelegate {
                                            let tintGreen,
                                            let tintBlue,
                                            let tintAlpha):
-            handleGetImageWithSystemSymbolName(requestId: requestId,
+            handleGetImageWithSystemSymbolName(requestID: requestID,
                                   symbolName: symbolName,
                                   pointSize: pointSize,
                                   weight: weight,
@@ -1291,19 +1291,19 @@ extension OuterframeContentConnection: OuterframeContentSocketDelegate {
             guard let delegate = delegate else { return }
             delegate.handleTextCursorUpdate(cursors: cursors)
 
-        case .copySelectedPasteboardResponse(let requestId, let items):
-            if let completion = pendingCopyRequests.removeValue(forKey: requestId) {
+        case .copySelectedPasteboardResponse(let requestID, let items):
+            if let completion = pendingCopyRequests.removeValue(forKey: requestID) {
                 completion(items)
             } else {
-                print("Browser: Received copySelectedPasteboardResponse for unknown request id \(requestId)")
+                print("Browser: Received copySelectedPasteboardResponse for unknown request ID \(requestID)")
             }
 
-        case .accessibilitySnapshotResponse(let requestId, let snapshotData):
-            if let completion = pendingAccessibilitySnapshotRequests.removeValue(forKey: requestId) {
+        case .accessibilitySnapshotResponse(let requestID, let snapshotData):
+            if let completion = pendingAccessibilitySnapshotRequests.removeValue(forKey: requestID) {
                 let snapshot = snapshotData.flatMap { OuterframeAccessibilitySnapshot.deserialize(from: $0) }
                 completion(snapshot)
             } else {
-                print("Browser: Received accessibilitySnapshotResponse for unknown request id \(requestId)")
+                print("Browser: Received accessibilitySnapshotResponse for unknown request ID \(requestID)")
             }
 
         case .accessibilityTreeChanged(let notificationMask):

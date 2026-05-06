@@ -137,12 +137,12 @@ class OuterlayerHost: NSObject {
         exit(0)
     }
 
-    func infraSocket(_ socket: InfraSocket, didReceiveMessageType typeRaw: UInt16, payload: Data) {
+    func infraSocket(_ socket: InfraSocket, didReceiveMessage messageData: Data) {
         let message: BrowserToContentInfraMessage
         do {
-            message = try BrowserToContentInfraMessage.decode(typeRaw: typeRaw, payload: payload)
+            message = try BrowserToContentInfraMessage.decode(message: messageData)
         } catch {
-            print("OuterframeContent: Failed to decode infrastructure message (type \(typeRaw)): \(error)")
+            print("OuterframeContent: Failed to decode infrastructure message: \(error)")
             return
         }
 

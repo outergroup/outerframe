@@ -605,27 +605,21 @@ final class OuterframeContentConnection: NSObject {
         let flags = UInt64(modifierFlags.rawValue)
         let clicks = UInt32(clickCount)
 
-        let kind: OuterframeContentMouseEventKind
+        let message: BrowserToContentMessage
         switch type {
         case .down:
-            kind = .mouseDown
+            message = .mouseDown(x: x, y: y, modifierFlags: flags, clickCount: clicks)
         case .dragged:
-            kind = .mouseDragged
+            message = .mouseDragged(x: x, y: y, modifierFlags: flags)
         case .up:
-            kind = .mouseUp
+            message = .mouseUp(x: x, y: y, modifierFlags: flags)
         case .moved:
-            kind = .mouseMoved
+            message = .mouseMoved(x: x, y: y, modifierFlags: flags)
         case .rightDown:
-            kind = .rightMouseDown
+            message = .rightMouseDown(x: x, y: y, modifierFlags: flags, clickCount: clicks)
         case .rightUp:
-            kind = .rightMouseUp
+            message = .rightMouseUp(x: x, y: y, modifierFlags: flags)
         }
-
-        let message = BrowserToContentMessage.mouseEvent(kind: kind,
-                                                              x: x,
-                                                              y: y,
-                                                              modifierFlags: flags,
-                                                              clickCount: clicks)
 
         let pluginSocket = self.pluginSocket
         Task {
@@ -642,8 +636,7 @@ final class OuterframeContentConnection: NSObject {
                               modifierFlags: NSEvent.ModifierFlags,
                               phase: NSEvent.Phase,
                               momentumPhase: NSEvent.Phase,
-                              isMomentum: Bool,
-                              isPrecise: Bool) {
+                              hasPreciseScrollingDeltas: Bool) {
         let x = Float32(point.x)
         let y = Float32(point.y)
         let deltaX = Float32(delta.x)
@@ -659,8 +652,7 @@ final class OuterframeContentConnection: NSObject {
                                                                     modifierFlags: flags,
                                                                     phase: phaseRaw,
                                                                     momentumPhase: momentumPhaseRaw,
-                                                                    isMomentum: isMomentum,
-                                                                    isPrecise: isPrecise)
+                                                                    hasPreciseScrollingDeltas: hasPreciseScrollingDeltas)
 
         let pluginSocket = self.pluginSocket
         Task {
@@ -960,12 +952,12 @@ final class OuterframeContentConnection: NSObject {
         }
     }
 
-    func sendKeyDown(keyCode: UInt16, characters: String, charactersIgnoringModifiers: String, modifierFlags: NSEvent.ModifierFlags, isRepeat: Bool) {
+    func sendKeyDown(keyCode: UInt16, characters: String, charactersIgnoringModifiers: String, modifierFlags: NSEvent.ModifierFlags, isARepeat: Bool) {
         let message = BrowserToContentMessage.keyDown(keyCode: keyCode,
                                                            characters: characters,
                                                            charactersIgnoringModifiers: charactersIgnoringModifiers,
                                                            modifierFlags: UInt64(modifierFlags.rawValue),
-                                                           isRepeat: isRepeat)
+                                                           isARepeat: isARepeat)
         let pluginSocket = self.pluginSocket
         Task {
             do {
@@ -976,12 +968,12 @@ final class OuterframeContentConnection: NSObject {
         }
     }
 
-    func sendKeyUp(keyCode: UInt16, characters: String, charactersIgnoringModifiers: String, modifierFlags: NSEvent.ModifierFlags, isRepeat: Bool) {
+    func sendKeyUp(keyCode: UInt16, characters: String, charactersIgnoringModifiers: String, modifierFlags: NSEvent.ModifierFlags, isARepeat: Bool) {
         let message = BrowserToContentMessage.keyUp(keyCode: keyCode,
                                                          characters: characters,
                                                          charactersIgnoringModifiers: charactersIgnoringModifiers,
                                                          modifierFlags: UInt64(modifierFlags.rawValue),
-                                                         isRepeat: isRepeat)
+                                                         isARepeat: isARepeat)
         let pluginSocket = self.pluginSocket
         Task {
             do {
@@ -1154,25 +1146,24 @@ final class OuterframeContentConnection: NSObject {
 }
 
 extension OuterframeContentConnection: OuterframeContentSocketDelegate {
-    @MainActor func outerframeContentSocket(_ socket: OuterframeContentSocket, didReceiveMessageType typeRaw: UInt16, payload: Data) {
+    @MainActor func outerframeContentSocket(_ socket: OuterframeContentSocket, didReceiveMessage message: Data) {
         if !socketReady {
             socketReady = true
         }
 
-        // Route to appropriate handler based on which socket received the message
         if socket === infrastructureSocket {
-            handleInfrastructureMessage(typeRaw: typeRaw, payload: payload)
+            handleInfrastructureMessage(messageData: message)
         } else {
-            handlePluginMessage(typeRaw: typeRaw, payload: payload)
+            handlePluginMessage(messageData: message)
         }
     }
 
-    private func handleInfrastructureMessage(typeRaw: UInt16, payload: Data) {
+    private func handleInfrastructureMessage(messageData: Data) {
         let message: ContentToBrowserInfraMessage
         do {
-            message = try ContentToBrowserInfraMessage.decode(typeRaw: typeRaw, payload: payload)
+            message = try ContentToBrowserInfraMessage.decode(message: messageData)
         } catch {
-            print("Browser: Failed to decode infrastructure message (type \(typeRaw)): \(error)")
+            print("Browser: Failed to decode infrastructure message: \(error)")
             return
         }
 
@@ -1208,12 +1199,12 @@ extension OuterframeContentConnection: OuterframeContentSocketDelegate {
         }
     }
 
-    private func handlePluginMessage(typeRaw: UInt16, payload: Data) {
+    private func handlePluginMessage(messageData: Data) {
         let message: ContentToBrowserMessage
         do {
-            message = try ContentToBrowserMessage.decode(typeRaw: typeRaw, payload: payload)
+            message = try ContentToBrowserMessage.decode(message: messageData)
         } catch {
-            print("Browser: Failed to decode plugin message (type \(typeRaw)): \(error)")
+            print("Browser: Failed to decode plugin message: \(error)")
             return
         }
 

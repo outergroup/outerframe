@@ -1522,14 +1522,12 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
     public func handleScrollWheel(at point: CGPoint, with event: NSEvent) {
         withActivePluginConnection { connection in
             let delta = CGPoint(x: event.scrollingDeltaX, y: event.scrollingDeltaY)
-            let isMomentum = !event.momentumPhase.isEmpty
             connection.sendScrollWheelEvent(point: point,
                                             delta: delta,
                                             modifierFlags: event.modifierFlags,
                                             phase: event.phase,
                                             momentumPhase: event.momentumPhase,
-                                            isMomentum: isMomentum,
-                                            isPrecise: event.hasPreciseScrollingDeltas)
+                                            hasPreciseScrollingDeltas: event.hasPreciseScrollingDeltas)
         }
     }
 
@@ -1576,7 +1574,7 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
         withActivePluginConnection { connection in
             let characters = event.characters ?? ""
             let charactersIgnoringModifiers = event.charactersIgnoringModifiers ?? ""
-            connection.sendKeyDown(keyCode: event.keyCode, characters: characters, charactersIgnoringModifiers: charactersIgnoringModifiers, modifierFlags: event.modifierFlags, isRepeat: event.isARepeat)
+            connection.sendKeyDown(keyCode: event.keyCode, characters: characters, charactersIgnoringModifiers: charactersIgnoringModifiers, modifierFlags: event.modifierFlags, isARepeat: event.isARepeat)
         }
     }
 
@@ -1585,7 +1583,7 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
         withActivePluginConnection { connection in
             let characters = event.characters ?? ""
             let charactersIgnoringModifiers = event.charactersIgnoringModifiers ?? ""
-            connection.sendKeyUp(keyCode: event.keyCode, characters: characters, charactersIgnoringModifiers: charactersIgnoringModifiers, modifierFlags: event.modifierFlags, isRepeat: event.isARepeat)
+            connection.sendKeyUp(keyCode: event.keyCode, characters: characters, charactersIgnoringModifiers: charactersIgnoringModifiers, modifierFlags: event.modifierFlags, isARepeat: event.isARepeat)
         }
     }
 

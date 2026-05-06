@@ -1,7 +1,8 @@
 import Foundation
 import AppKit.NSAppearance
 
-let OuterframeContentInfraSocketHeaderLength = MemoryLayout<UInt16>.size + MemoryLayout<UInt32>.size
+let OuterframeContentInfraSocketHeaderLength = MemoryLayout<UInt32>.size
+let OuterframeContentInfraSocketMessageTypeLength = MemoryLayout<UInt16>.size
 
 // MARK: - Infrastructure Messages (Browser ↔ OuterframeContent)
 
@@ -25,7 +26,7 @@ enum BrowserToContentInfraMessage {
 
         case .setDebuggerAttachmentMonitoring(let isEnabled):
             var payload = Data(capacity: 1)
-            payload.append(uint8: isEnabled ? 1 : 0)
+            payload.append(uint8: isEnabled ? 1 << 0 : 0)
             return makeBrowserToContentInfraFrame(type: .setDebuggerAttachmentMonitoring, payload: payload)
 
         case .shutdown:
@@ -33,12 +34,14 @@ enum BrowserToContentInfraMessage {
         }
     }
 
-    static func decode(typeRaw: UInt16, payload: Data) throws -> BrowserToContentInfraMessage {
+    static func decode(message: Data) throws -> BrowserToContentInfraMessage {
+        var cursor = DataCursor(message)
+        guard let typeRaw = cursor.readUInt16() else {
+            throw OuterframeContentInfraSocketMessageError.truncatedPayload
+        }
         guard let type = BrowserToContentInfraMessageKind(rawValue: typeRaw) else {
             throw OuterframeContentInfraSocketMessageError.unknownType(typeRaw)
         }
-
-        var cursor = DataCursor(payload)
 
         switch type {
         case .loadPluginRequest:
@@ -55,7 +58,7 @@ enum BrowserToContentInfraMessage {
             guard let raw = cursor.readUInt8() else {
                 throw OuterframeContentInfraSocketMessageError.truncatedPayload
             }
-            return .setDebuggerAttachmentMonitoring(isEnabled: raw != 0)
+            return .setDebuggerAttachmentMonitoring(isEnabled: raw & (1 << 0) != 0)
 
         case .shutdown:
             return .shutdown
@@ -87,7 +90,7 @@ enum ContentToBrowserInfraMessage {
         case .pluginLoaded(let contextID, let success):
             var payload = Data(capacity: 4 + 1)
             payload.append(uint32: contextID)
-            payload.append(uint8: success ? 1 : 0)
+            payload.append(uint8: success ? 1 << 0 : 0)
             return makeContentToBrowserInfraFrame(type: .pluginLoaded, payload: payload)
 
         case .pluginUnloaded:
@@ -98,12 +101,14 @@ enum ContentToBrowserInfraMessage {
         }
     }
 
-    static func decode(typeRaw: UInt16, payload: Data) throws -> ContentToBrowserInfraMessage {
+    static func decode(message: Data) throws -> ContentToBrowserInfraMessage {
+        var cursor = DataCursor(message)
+        guard let typeRaw = cursor.readUInt16() else {
+            throw OuterframeContentInfraSocketMessageError.truncatedPayload
+        }
         guard let type = ContentToBrowserInfraMessageKind(rawValue: typeRaw) else {
             throw OuterframeContentInfraSocketMessageError.unknownType(typeRaw)
         }
-
-        var cursor = DataCursor(payload)
 
         switch type {
         case .loadPluginSuccess:
@@ -121,10 +126,10 @@ enum ContentToBrowserInfraMessage {
 
         case .pluginLoaded:
             guard let contextID = cursor.readUInt32(),
-                  let successRaw = cursor.readUInt8() else {
+                  let flags = cursor.readUInt8() else {
                 throw OuterframeContentInfraSocketMessageError.truncatedPayload
             }
-            return .pluginLoaded(contextID: contextID, success: successRaw != 0)
+            return .pluginLoaded(contextID: contextID, success: flags & (1 << 0) != 0)
 
         case .pluginUnloaded:
             return .pluginUnloaded
@@ -144,35 +149,37 @@ enum OuterframeContentInfraSocketMessageError: Error {
 // MARK: - Message Kind Enums
 
 private enum BrowserToContentInfraMessageKind: UInt16 {
-    case loadPluginRequest = 3
-    case unloadPluginRequest = 6
-    case setDebuggerAttachmentMonitoring = 48
-    case shutdown = 49
+    case loadPluginRequest = 3000
+    case unloadPluginRequest = 3001
+    case shutdown = 3002
+    case setDebuggerAttachmentMonitoring = 3003
 }
 
 private enum ContentToBrowserInfraMessageKind: UInt16 {
-    case loadPluginSuccess = 4
-    case loadPluginFailure = 5
-    case pluginLoaded = 19
-    case pluginUnloaded = 20
-    case debuggerAttached = 47
+    case loadPluginSuccess = 4000
+    case loadPluginFailure = 4001
+    case pluginLoaded = 4002
+    case pluginUnloaded = 4003
+    case debuggerAttached = 4004
 }
 
 
 // MARK: - Frame Helpers
 
 private func makeBrowserToContentInfraFrame(type: BrowserToContentInfraMessageKind, payload: Data) -> Data {
-    var frame = Data(capacity: OuterframeContentInfraSocketHeaderLength + payload.count)
+    let messageLength = OuterframeContentInfraSocketMessageTypeLength + payload.count
+    var frame = Data(capacity: OuterframeContentInfraSocketHeaderLength + messageLength)
+    frame.append(uint32: UInt32(messageLength))
     frame.append(uint16: type.rawValue)
-    frame.append(uint32: UInt32(payload.count))
     frame.append(payload)
     return frame
 }
 
 private func makeContentToBrowserInfraFrame(type: ContentToBrowserInfraMessageKind, payload: Data) -> Data {
-    var frame = Data(capacity: OuterframeContentInfraSocketHeaderLength + payload.count)
+    let messageLength = OuterframeContentInfraSocketMessageTypeLength + payload.count
+    var frame = Data(capacity: OuterframeContentInfraSocketHeaderLength + messageLength)
+    frame.append(uint32: UInt32(messageLength))
     frame.append(uint16: type.rawValue)
-    frame.append(uint32: UInt32(payload.count))
     frame.append(payload)
     return frame
 }
@@ -190,29 +197,18 @@ private struct OffsetPayloadBuilder {
     private var fixed = Data()
     private var variable = Data()
     private var references: [Reference] = []
+    private let referenceBaseOffset: Int
 
-    mutating func append(uint32 value: UInt32) {
-        fixed.append(uint32: value)
-    }
-
-    mutating func append(int32 value: Int32) {
-        fixed.append(int32: value)
-    }
-
-    mutating func append(uint16 value: UInt16) {
-        fixed.append(uint16: value)
+    init(referenceBaseOffset: Int = OuterframeContentInfraSocketMessageTypeLength) {
+        self.referenceBaseOffset = referenceBaseOffset
     }
 
     mutating func append(uint8 value: UInt8) {
         fixed.append(uint8: value)
     }
 
-    mutating func append(uint64 value: UInt64) {
-        fixed.append(uint64: value)
-    }
-
-    mutating func append(float32 value: Float32) {
-        fixed.append(float32: value)
+    mutating func append(uint32 value: UInt32) {
+        fixed.append(uint32: value)
     }
 
     mutating func append(uuid: UUID) {
@@ -247,7 +243,7 @@ private struct OffsetPayloadBuilder {
         }
 
         for reference in references {
-            let offset = fixed.count + reference.variableOffset
+            let offset = referenceBaseOffset + fixed.count + reference.variableOffset
             guard offset <= UInt32.max,
                   reference.length <= UInt32.max else {
                 throw OuterframeContentInfraSocketMessageError.encodingFailure("Payload too long")
@@ -316,7 +312,8 @@ private struct DataCursor {
     }
 
     mutating func readData(_ length: Int) -> Data? {
-        guard offset + length <= data.count else { return nil }
+        guard length >= 0,
+              length <= data.count - offset else { return nil }
         let range = offset..<(offset + length)
         offset += length
         return data.subdata(in: range)
@@ -389,10 +386,12 @@ fileprivate extension Data {
         var uuidValue = uuid.uuid
         Swift.withUnsafeBytes(of: &uuidValue) { append(contentsOf: $0) }
     }
+
     mutating func replaceUInt32(at offset: Int, with value: UInt32) {
         var le = value.littleEndian
         Swift.withUnsafeBytes(of: &le) {
             replaceSubrange(offset..<(offset + 4), with: $0)
         }
     }
+
 }

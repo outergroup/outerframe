@@ -4,7 +4,7 @@ import Darwin
 
 @MainActor
 protocol OuterframeContentSocketDelegate: AnyObject, Sendable {
-    func outerframeContentSocket(_ socket: OuterframeContentSocket, didReceiveMessageType typeRaw: UInt16, payload: Data)
+    func outerframeContentSocket(_ socket: OuterframeContentSocket, didReceiveMessage message: Data)
     func outerframeContentSocketDidClose(_ socket: OuterframeContentSocket)
 }
 
@@ -183,29 +183,23 @@ actor OuterframeContentSocket {
 
     private func processIncomingBuffer() {
         while incomingBuffer.count >= OuterframeContentSocketHeaderLength {
-            let typeRange = incomingBuffer.startIndex..<(incomingBuffer.startIndex + MemoryLayout<UInt16>.size)
-            let typeRaw = incomingBuffer[typeRange].enumerated().reduce(UInt16(0)) {
-                $0 | (UInt16($1.element) << (8 * $1.offset))
-            }
-
-            let lengthStart = incomingBuffer.startIndex + MemoryLayout<UInt16>.size
-            let lengthRange = lengthStart..<(lengthStart + MemoryLayout<UInt32>.size)
+            let lengthRange = incomingBuffer.startIndex..<(incomingBuffer.startIndex + MemoryLayout<UInt32>.size)
             let lengthData = incomingBuffer.subdata(in: lengthRange)
-            let payloadLength = lengthData.enumerated().reduce(UInt32(0)) {
+            let messageLength = lengthData.enumerated().reduce(UInt32(0)) {
                 $0 | (UInt32($1.element) << (8 * $1.offset))
             }
-            let totalLength = OuterframeContentSocketHeaderLength + Int(payloadLength)
+            let totalLength = OuterframeContentSocketHeaderLength + Int(messageLength)
 
             guard incomingBuffer.count >= totalLength else { break }
 
-            let payloadStart = incomingBuffer.startIndex + OuterframeContentSocketHeaderLength
-            let payloadEnd = payloadStart + Int(payloadLength)
-            let payload = incomingBuffer.subdata(in: payloadStart..<payloadEnd)
+            let messageStart = incomingBuffer.startIndex + OuterframeContentSocketHeaderLength
+            let messageEnd = messageStart + Int(messageLength)
+            let message = incomingBuffer.subdata(in: messageStart..<messageEnd)
 
-            incomingBuffer.removeSubrange(incomingBuffer.startIndex..<payloadEnd)
+            incomingBuffer.removeSubrange(incomingBuffer.startIndex..<messageEnd)
 
             if let delegate {
-                Task { await delegate.outerframeContentSocket(self, didReceiveMessageType: typeRaw, payload: payload) }
+                Task { await delegate.outerframeContentSocket(self, didReceiveMessage: message) }
             }
         }
     }

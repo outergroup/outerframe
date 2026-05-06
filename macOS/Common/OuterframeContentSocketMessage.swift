@@ -119,9 +119,9 @@ enum BrowserToContentMessage {
             var encodedArguments: [(kind: InitArgKind, payload: Data)] = []
 
             if let data = arguments.data {
-                var argPayload = Data()
-                try argPayload.append(lengthPrefixedData32: data)
-                encodedArguments.append((kind: .data, payload: argPayload))
+                var argPayload = OffsetPayloadBuilder()
+                try argPayload.append(dataReference: data)
+                encodedArguments.append((kind: .data, payload: try argPayload.finalize()))
             }
 
             if let contentWidth = arguments.contentWidth,
@@ -133,46 +133,46 @@ enum BrowserToContentMessage {
             }
 
             if let appearance = arguments.appearance {
-                var argPayload = Data()
+                var argPayload = OffsetPayloadBuilder()
                 let appearanceData = try NSKeyedArchiver.archivedData(withRootObject: appearance, requiringSecureCoding: true)
-                try argPayload.append(lengthPrefixedData32: appearanceData)
-                encodedArguments.append((kind: .appearance, payload: argPayload))
+                try argPayload.append(dataReference: appearanceData)
+                encodedArguments.append((kind: .appearance, payload: try argPayload.finalize()))
             }
 
             if let proxy = arguments.proxy {
-                var argPayload = Data()
-                try argPayload.append(lengthPrefixedUTF8_32: proxy.host)
+                var argPayload = OffsetPayloadBuilder()
+                try argPayload.append(stringReference: proxy.host)
                 argPayload.append(uint16: proxy.port)
-                encodedArguments.append((kind: .proxy, payload: argPayload))
+                encodedArguments.append((kind: .proxy, payload: try argPayload.finalize()))
 
                 if proxy.username != nil || proxy.password != nil {
-                    var authPayload = Data()
+                    var authPayload = OffsetPayloadBuilder()
                     if let username = proxy.username {
                         authPayload.append(uint8: 1)
-                        try authPayload.append(lengthPrefixedUTF8_32: username)
+                        try authPayload.append(stringReference: username)
                     } else {
                         authPayload.append(uint8: 0)
                     }
                     if let password = proxy.password {
                         authPayload.append(uint8: 1)
-                        try authPayload.append(lengthPrefixedUTF8_32: password)
+                        try authPayload.append(stringReference: password)
                     } else {
                         authPayload.append(uint8: 0)
                     }
-                    encodedArguments.append((kind: .proxyAuth, payload: authPayload))
+                    encodedArguments.append((kind: .proxyAuth, payload: try authPayload.finalize()))
                 }
             }
 
             if let url = arguments.url {
-                var argPayload = Data()
-                try argPayload.append(lengthPrefixedUTF8_32: url)
-                encodedArguments.append((kind: .url, payload: argPayload))
+                var argPayload = OffsetPayloadBuilder()
+                try argPayload.append(stringReference: url)
+                encodedArguments.append((kind: .url, payload: try argPayload.finalize()))
             }
 
             if let bundleUrl = arguments.bundleUrl {
-                var argPayload = Data()
-                try argPayload.append(lengthPrefixedUTF8_32: bundleUrl)
-                encodedArguments.append((kind: .bundleUrl, payload: argPayload))
+                var argPayload = OffsetPayloadBuilder()
+                try argPayload.append(stringReference: bundleUrl)
+                encodedArguments.append((kind: .bundleUrl, payload: try argPayload.finalize()))
             }
 
             if let windowIsActive = arguments.windowIsActive {
@@ -181,16 +181,16 @@ enum BrowserToContentMessage {
                 encodedArguments.append((kind: .windowIsActive, payload: argPayload))
             }
 
-            var payload = Data()
+            var payload = OffsetPayloadBuilder()
             payload.append(uint16: UInt16(min(encodedArguments.count, Int(UInt16.max))))
 
             for encodedArgument in encodedArguments {
                 payload.append(uint8: encodedArgument.kind.rawValue)
                 let argPayload = encodedArgument.payload
-                try payload.append(lengthPrefixedData32: argPayload)
+                try payload.append(dataReference: argPayload)
             }
 
-            return makeBrowserToContentFrame(type: .initializeContent, payload: payload)
+            return makeBrowserToContentFrame(type: .initializeContent, payload: try payload.finalize())
 
         case .displayLinkFired(let frameNumber, let targetTimestamp):
             var payload = Data(capacity: 16)
@@ -241,22 +241,22 @@ enum BrowserToContentMessage {
             return makeBrowserToContentFrame(type: .scrollWheelEvent, payload: payload)
 
         case .keyDown(let keyCode, let characters, let charactersIgnoringModifiers, let modifierFlags, let isRepeat):
-            var payload = Data()
+            var payload = OffsetPayloadBuilder()
             payload.append(uint16: keyCode)
-            try payload.append(lengthPrefixedUTF8_32: characters)
-            try payload.append(lengthPrefixedUTF8_32: charactersIgnoringModifiers)
+            try payload.append(stringReference: characters)
+            try payload.append(stringReference: charactersIgnoringModifiers)
             payload.append(uint64: modifierFlags)
             payload.append(uint8: isRepeat ? 1 : 0)
-            return makeBrowserToContentFrame(type: .keyDown, payload: payload)
+            return makeBrowserToContentFrame(type: .keyDown, payload: try payload.finalize())
 
         case .keyUp(let keyCode, let characters, let charactersIgnoringModifiers, let modifierFlags, let isRepeat):
-            var payload = Data()
+            var payload = OffsetPayloadBuilder()
             payload.append(uint16: keyCode)
-            try payload.append(lengthPrefixedUTF8_32: characters)
-            try payload.append(lengthPrefixedUTF8_32: charactersIgnoringModifiers)
+            try payload.append(stringReference: characters)
+            try payload.append(stringReference: charactersIgnoringModifiers)
             payload.append(uint64: modifierFlags)
             payload.append(uint8: isRepeat ? 1 : 0)
-            return makeBrowserToContentFrame(type: .keyUp, payload: payload)
+            return makeBrowserToContentFrame(type: .keyUp, payload: try payload.finalize())
 
         case .magnification(let surfaceID, let magnification, let x, let y, let scrollX, let scrollY):
             var payload = Data()
@@ -285,42 +285,42 @@ enum BrowserToContentMessage {
             return makeBrowserToContentFrame(type: .quickLook, payload: payload)
 
         case .imageWithSystemSymbolName(let requestID, let imageData, let width, let height, let success, let errorMessage):
-            var payload = Data()
+            var payload = OffsetPayloadBuilder()
             payload.append(uuid: requestID)
             payload.append(uint32: width)
             payload.append(uint32: height)
             payload.append(uint8: success ? 1 : 0)
             if let imageData {
                 payload.append(uint8: 1)
-                try payload.append(lengthPrefixedData32: imageData)
+                try payload.append(dataReference: imageData)
             } else {
                 payload.append(uint8: 0)
             }
             if let errorMessage {
                 payload.append(uint8: 1)
-                try payload.append(lengthPrefixedUTF8_32: errorMessage)
+                try payload.append(stringReference: errorMessage)
             } else {
                 payload.append(uint8: 0)
             }
-            return makeBrowserToContentFrame(type: .imageWithSystemSymbolName, payload: payload)
+            return makeBrowserToContentFrame(type: .imageWithSystemSymbolName, payload: try payload.finalize())
 
         case .textInput(let text, let hasReplacementRange, let replacementLocation, let replacementLength):
-            var payload = Data()
-            try payload.append(lengthPrefixedUTF8_32: text)
+            var payload = OffsetPayloadBuilder()
+            try payload.append(stringReference: text)
             payload.append(uint8: hasReplacementRange ? 1 : 0)
             payload.append(uint64: replacementLocation)
             payload.append(uint64: replacementLength)
-            return makeBrowserToContentFrame(type: .textInput, payload: payload)
+            return makeBrowserToContentFrame(type: .textInput, payload: try payload.finalize())
 
         case .setMarkedText(let text, let selectedLocation, let selectedLength, let hasReplacementRange, let replacementLocation, let replacementLength):
-            var payload = Data()
-            try payload.append(lengthPrefixedUTF8_32: text)
+            var payload = OffsetPayloadBuilder()
+            try payload.append(stringReference: text)
             payload.append(uint64: selectedLocation)
             payload.append(uint64: selectedLength)
             payload.append(uint8: hasReplacementRange ? 1 : 0)
             payload.append(uint64: replacementLocation)
             payload.append(uint64: replacementLength)
-            return makeBrowserToContentFrame(type: .setMarkedText, payload: payload)
+            return makeBrowserToContentFrame(type: .setMarkedText, payload: try payload.finalize())
 
         case .unmarkText:
             return makeBrowserToContentFrame(type: .unmarkText, payload: Data())
@@ -332,9 +332,9 @@ enum BrowserToContentMessage {
             return makeBrowserToContentFrame(type: .textInputFocus, payload: payload)
 
         case .textCommand(let command):
-            var payload = Data()
-            try payload.append(lengthPrefixedUTF8_32: command)
-            return makeBrowserToContentFrame(type: .textCommand, payload: payload)
+            var payload = OffsetPayloadBuilder()
+            try payload.append(stringReference: command)
+            return makeBrowserToContentFrame(type: .textCommand, payload: try payload.finalize())
 
         case .setCursorPosition(let fieldID, let position, let modifySelection):
             var payload = Data()
@@ -344,10 +344,10 @@ enum BrowserToContentMessage {
             return makeBrowserToContentFrame(type: .setCursorPosition, payload: payload)
 
         case .systemAppearanceUpdate(let appearance):
-            var payload = Data()
+            var payload = OffsetPayloadBuilder()
             let appearanceData = try NSKeyedArchiver.archivedData(withRootObject: appearance, requiringSecureCoding: true)
-            try payload.append(lengthPrefixedData32: appearanceData)
-            return makeBrowserToContentFrame(type: .systemAppearanceUpdate, payload: payload)
+            try payload.append(dataReference: appearanceData)
+            return makeBrowserToContentFrame(type: .systemAppearanceUpdate, payload: try payload.finalize())
 
         case .windowActiveUpdate(let isActive):
             var payload = Data(capacity: 1)
@@ -365,14 +365,14 @@ enum BrowserToContentMessage {
             return makeBrowserToContentFrame(type: .copySelectedPasteboardRequest, payload: payload)
 
         case .pasteboardContentDelivered(let items):
-            var payload = Data()
+            var payload = OffsetPayloadBuilder()
             let clampedCount = UInt16(min(items.count, Int(UInt16.max)))
             payload.append(uint16: clampedCount)
             for item in items.prefix(Int(clampedCount)) {
-                try payload.append(lengthPrefixedUTF8_32: item.typeIdentifier)
-                try payload.append(lengthPrefixedData32: item.data)
+                try payload.append(stringReference: item.typeIdentifier)
+                try payload.append(dataReference: item.data)
             }
-            return makeBrowserToContentFrame(type: .pasteboardContentDelivered, payload: payload)
+            return makeBrowserToContentFrame(type: .pasteboardContentDelivered, payload: try payload.finalize())
 
         case .accessibilitySnapshotRequest(let requestID):
             var payload = Data(capacity: 16)
@@ -403,7 +403,7 @@ enum BrowserToContentMessage {
 
             for _ in 0..<argCount {
                 guard let kindRaw = cursor.readUInt8(),
-                      let argData = cursor.readData32() else {
+                      let argData = cursor.readDataReference() else {
                     throw OuterframeContentSocketMessageError.truncatedPayload
                 }
 
@@ -415,7 +415,7 @@ enum BrowserToContentMessage {
 
                 switch kind {
                 case .data:
-                    guard let data = argCursor.readData32() else {
+                    guard let data = argCursor.readDataReference() else {
                         throw OuterframeContentSocketMessageError.truncatedPayload
                     }
                     arguments.data = data
@@ -429,14 +429,14 @@ enum BrowserToContentMessage {
                     arguments.contentHeight = height
 
                 case .appearance:
-                    guard let appearanceData = argCursor.readData32(),
+                    guard let appearanceData = argCursor.readDataReference(),
                           let decoded = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSAppearance.self, from: appearanceData) else {
                         throw OuterframeContentSocketMessageError.truncatedPayload
                     }
                     arguments.appearance = decoded
 
                 case .proxy:
-                    guard let proxyHost = argCursor.readString32(),
+                    guard let proxyHost = argCursor.readStringReference(),
                           let proxyPort = argCursor.readUInt16() else {
                         throw OuterframeContentSocketMessageError.truncatedPayload
                     }
@@ -450,7 +450,7 @@ enum BrowserToContentMessage {
                         throw OuterframeContentSocketMessageError.truncatedPayload
                     }
                     if usernameIsPresent != 0 {
-                        guard let username = argCursor.readString32() else {
+                        guard let username = argCursor.readStringReference() else {
                             throw OuterframeContentSocketMessageError.truncatedPayload
                         }
                         proxyUsername = username
@@ -462,7 +462,7 @@ enum BrowserToContentMessage {
                         throw OuterframeContentSocketMessageError.truncatedPayload
                     }
                     if passwordIsPresent != 0 {
-                        guard let password = argCursor.readString32() else {
+                        guard let password = argCursor.readStringReference() else {
                             throw OuterframeContentSocketMessageError.truncatedPayload
                         }
                         proxyPassword = password
@@ -477,13 +477,13 @@ enum BrowserToContentMessage {
                     }
 
                 case .url:
-                    guard let url = argCursor.readString32() else {
+                    guard let url = argCursor.readStringReference() else {
                         throw OuterframeContentSocketMessageError.truncatedPayload
                     }
                     arguments.url = url
 
                 case .bundleUrl:
-                    guard let bundleUrl = argCursor.readString32() else {
+                    guard let bundleUrl = argCursor.readStringReference() else {
                         throw OuterframeContentSocketMessageError.truncatedPayload
                     }
                     arguments.bundleUrl = bundleUrl
@@ -550,8 +550,8 @@ enum BrowserToContentMessage {
 
         case .keyDown:
             guard let keyCode = cursor.readUInt16(),
-                  let characters = cursor.readString32(),
-                  let charactersIgnoringModifiers = cursor.readString32(),
+                  let characters = cursor.readStringReference(),
+                  let charactersIgnoringModifiers = cursor.readStringReference(),
                   let modifierFlags = cursor.readUInt64(),
                   let repeatRaw = cursor.readUInt8() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
@@ -562,8 +562,8 @@ enum BrowserToContentMessage {
 
         case .keyUp:
             guard let keyCode = cursor.readUInt16(),
-                  let characters = cursor.readString32(),
-                  let charactersIgnoringModifiers = cursor.readString32(),
+                  let characters = cursor.readStringReference(),
+                  let charactersIgnoringModifiers = cursor.readStringReference(),
                   let modifierFlags = cursor.readUInt64(),
                   let repeatRaw = cursor.readUInt8() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
@@ -614,7 +614,7 @@ enum BrowserToContentMessage {
 
             var imageData: Data? = nil
             if hasImageRaw != 0 {
-                guard let data = cursor.readData32() else {
+                guard let data = cursor.readDataReference() else {
                     throw OuterframeContentSocketMessageError.truncatedPayload
                 }
                 imageData = data
@@ -626,7 +626,7 @@ enum BrowserToContentMessage {
 
             var errorMessage: String? = nil
             if hasErrorMessageRaw != 0 {
-                guard let message = cursor.readString32() else {
+                guard let message = cursor.readStringReference() else {
                     throw OuterframeContentSocketMessageError.truncatedPayload
                 }
                 errorMessage = message
@@ -637,7 +637,7 @@ enum BrowserToContentMessage {
                                      success: successRaw != 0, errorMessage: errorMessage)
 
         case .textInput:
-            guard let text = cursor.readString32(),
+            guard let text = cursor.readStringReference(),
                   let hasRangeRaw = cursor.readUInt8(),
                   let replacementLocation = cursor.readUInt64(),
                   let replacementLength = cursor.readUInt64() else {
@@ -648,7 +648,7 @@ enum BrowserToContentMessage {
                               replacementLength: replacementLength)
 
         case .setMarkedText:
-            guard let text = cursor.readString32(),
+            guard let text = cursor.readStringReference(),
                   let selectedLocation = cursor.readUInt64(),
                   let selectedLength = cursor.readUInt64(),
                   let hasRangeRaw = cursor.readUInt8(),
@@ -673,7 +673,7 @@ enum BrowserToContentMessage {
             return .textInputFocus(fieldID: fieldID, hasFocus: hasFocusRaw != 0)
 
         case .textCommand:
-            guard let command = cursor.readString32() else {
+            guard let command = cursor.readStringReference() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
             }
             return .textCommand(command: command)
@@ -688,7 +688,7 @@ enum BrowserToContentMessage {
                                       modifySelection: modifySelectionRaw != 0)
 
         case .systemAppearanceUpdate:
-            guard let appearanceData = cursor.readData32() else {
+            guard let appearanceData = cursor.readDataReference() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
             }
             let appearance = (try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSAppearance.self, from: appearanceData))
@@ -720,8 +720,8 @@ enum BrowserToContentMessage {
             var items: [OuterframeContentPasteboardItem] = []
             items.reserveCapacity(Int(count))
             for _ in 0..<count {
-                guard let identifier = cursor.readString32(),
-                      let data = cursor.readData32() else {
+                guard let identifier = cursor.readStringReference(),
+                      let data = cursor.readDataReference() else {
                     throw OuterframeContentSocketMessageError.truncatedPayload
                 }
                 items.append(OuterframeContentPasteboardItem(typeIdentifier: identifier, data: data))
@@ -788,32 +788,32 @@ enum ContentToBrowserMessage {
             return makeContentToBrowserFrame(type: .inputModeUpdate, payload: payload)
 
         case .showContextMenu(let attributedTextData, let locationX, let locationY):
-            var payload = Data()
+            var payload = OffsetPayloadBuilder()
             payload.append(float32: locationX)
             payload.append(float32: locationY)
-            try payload.append(lengthPrefixedData32: attributedTextData)
-            return makeContentToBrowserFrame(type: .showContextMenu, payload: payload)
+            try payload.append(dataReference: attributedTextData)
+            return makeContentToBrowserFrame(type: .showContextMenu, payload: try payload.finalize())
 
         case .showDefinition(let attributedTextData, let locationX, let locationY):
-            var payload = Data()
+            var payload = OffsetPayloadBuilder()
             payload.append(float32: locationX)
             payload.append(float32: locationY)
-            try payload.append(lengthPrefixedData32: attributedTextData)
-            return makeContentToBrowserFrame(type: .showDefinition, payload: payload)
+            try payload.append(dataReference: attributedTextData)
+            return makeContentToBrowserFrame(type: .showDefinition, payload: try payload.finalize())
 
         case .getImageWithSystemSymbolName(let requestID, let symbolName, let pointSize, let weight,
                               let scale, let tintRed, let tintGreen, let tintBlue, let tintAlpha):
-            var payload = Data()
+            var payload = OffsetPayloadBuilder()
             payload.append(uuid: requestID)
-            try payload.append(lengthPrefixedUTF8_32: symbolName)
+            try payload.append(stringReference: symbolName)
             payload.append(float32: pointSize)
-            try payload.append(lengthPrefixedUTF8_32: weight)
+            try payload.append(stringReference: weight)
             payload.append(float32: scale)
             payload.append(float32: tintRed)
             payload.append(float32: tintGreen)
             payload.append(float32: tintBlue)
             payload.append(float32: tintAlpha)
-            return makeContentToBrowserFrame(type: .getImageWithSystemSymbolName, payload: payload)
+            return makeContentToBrowserFrame(type: .getImageWithSystemSymbolName, payload: try payload.finalize())
 
         case .textCursorUpdate(let cursors):
             var payload = Data()
@@ -830,22 +830,22 @@ enum ContentToBrowserMessage {
             return makeContentToBrowserFrame(type: .textCursorUpdate, payload: payload)
 
         case .copySelectedPasteboardResponse(let requestID, let items):
-            var payload = Data()
+            var payload = OffsetPayloadBuilder()
             payload.append(uuid: requestID)
             let clampedCount = UInt16(min(items.count, Int(UInt16.max)))
             payload.append(uint16: clampedCount)
             for item in items.prefix(Int(clampedCount)) {
-                try payload.append(lengthPrefixedUTF8_32: item.typeIdentifier)
-                try payload.append(lengthPrefixedData32: item.data)
+                try payload.append(stringReference: item.typeIdentifier)
+                try payload.append(dataReference: item.data)
             }
-            return makeContentToBrowserFrame(type: .copySelectedPasteboardResponse, payload: payload)
+            return makeContentToBrowserFrame(type: .copySelectedPasteboardResponse, payload: try payload.finalize())
 
         case .openNewWindow(let url, let displayString, let preferredWidth, let preferredHeight):
-            var payload = Data()
-            try payload.append(lengthPrefixedUTF8_32: url)
+            var payload = OffsetPayloadBuilder()
+            try payload.append(stringReference: url)
             if let displayString {
                 payload.append(uint8: 1)
-                try payload.append(lengthPrefixedUTF8_32: displayString)
+                try payload.append(stringReference: displayString)
             } else {
                 payload.append(uint8: 0)
             }
@@ -856,29 +856,29 @@ enum ContentToBrowserMessage {
             } else {
                 payload.append(uint8: 0)
             }
-            return makeContentToBrowserFrame(type: .openNewWindow, payload: payload)
+            return makeContentToBrowserFrame(type: .openNewWindow, payload: try payload.finalize())
 
         case .setPasteboardCapabilities(let canCopy, let canCut, let pasteboardTypes):
-            var payload = Data()
+            var payload = OffsetPayloadBuilder()
             payload.append(uint8: canCopy ? 1 : 0)
             payload.append(uint8: canCut ? 1 : 0)
             let clampedCount = UInt16(min(pasteboardTypes.count, Int(UInt16.max)))
             payload.append(uint16: clampedCount)
             for identifier in pasteboardTypes.prefix(Int(clampedCount)) {
-                try payload.append(lengthPrefixedUTF8_32: identifier)
+                try payload.append(stringReference: identifier)
             }
-            return makeContentToBrowserFrame(type: .editingCapabilitiesUpdate, payload: payload)
+            return makeContentToBrowserFrame(type: .editingCapabilitiesUpdate, payload: try payload.finalize())
 
         case .accessibilitySnapshotResponse(let requestID, let snapshotData):
-            var payload = Data()
+            var payload = OffsetPayloadBuilder()
             payload.append(uuid: requestID)
             if let snapshotData {
                 payload.append(uint8: 1)
-                try payload.append(lengthPrefixedData32: snapshotData)
+                try payload.append(dataReference: snapshotData)
             } else {
                 payload.append(uint8: 0)
             }
-            return makeContentToBrowserFrame(type: .accessibilitySnapshotResponse, payload: payload)
+            return makeContentToBrowserFrame(type: .accessibilitySnapshotResponse, payload: try payload.finalize())
 
         case .accessibilityTreeChanged(let notificationMask):
             var payload = Data(capacity: 1)
@@ -927,7 +927,7 @@ enum ContentToBrowserMessage {
         case .showContextMenu:
             guard let locationX = cursor.readFloat32(),
                   let locationY = cursor.readFloat32(),
-                  let attributedTextData = cursor.readData32() else {
+                  let attributedTextData = cursor.readDataReference() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
             }
             return .showContextMenu(attributedTextData: attributedTextData,
@@ -936,7 +936,7 @@ enum ContentToBrowserMessage {
         case .showDefinition:
             guard let locationX = cursor.readFloat32(),
                   let locationY = cursor.readFloat32(),
-                  let attributedTextData = cursor.readData32() else {
+                  let attributedTextData = cursor.readDataReference() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
             }
             return .showDefinition(attributedTextData: attributedTextData,
@@ -944,9 +944,9 @@ enum ContentToBrowserMessage {
 
         case .getImageWithSystemSymbolName:
             guard let requestID = cursor.readUUID(),
-                  let symbolName = cursor.readString32(),
+                  let symbolName = cursor.readStringReference(),
                   let pointSize = cursor.readFloat32(),
-                  let weight = cursor.readString32(),
+                  let weight = cursor.readStringReference(),
                   let scale = cursor.readFloat32(),
                   let tintRed = cursor.readFloat32(),
                   let tintGreen = cursor.readFloat32(),
@@ -989,8 +989,8 @@ enum ContentToBrowserMessage {
             var items: [OuterframeContentPasteboardItem] = []
             items.reserveCapacity(Int(count))
             for _ in 0..<count {
-                guard let identifier = cursor.readString32(),
-                      let data = cursor.readData32() else {
+                guard let identifier = cursor.readStringReference(),
+                      let data = cursor.readDataReference() else {
                     throw OuterframeContentSocketMessageError.truncatedPayload
                 }
                 items.append(OuterframeContentPasteboardItem(typeIdentifier: identifier, data: data))
@@ -1006,7 +1006,7 @@ enum ContentToBrowserMessage {
             var identifiers: [String] = []
             identifiers.reserveCapacity(Int(count))
             for _ in 0..<count {
-                guard let identifier = cursor.readString32() else {
+                guard let identifier = cursor.readStringReference() else {
                     throw OuterframeContentSocketMessageError.truncatedPayload
                 }
                 identifiers.append(identifier)
@@ -1022,7 +1022,7 @@ enum ContentToBrowserMessage {
             }
             let snapshotData: Data?
             if hasData != 0 {
-                guard let payload = cursor.readData32() else {
+                guard let payload = cursor.readDataReference() else {
                     throw OuterframeContentSocketMessageError.truncatedPayload
                 }
                 snapshotData = payload
@@ -1044,13 +1044,13 @@ enum ContentToBrowserMessage {
             return .hapticFeedback(style: style)
 
         case .openNewWindow:
-            guard let url = cursor.readString32(),
+            guard let url = cursor.readStringReference(),
                   let hasDisplayRaw = cursor.readUInt8() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
             }
             let displayString: String?
             if hasDisplayRaw != 0 {
-                guard let value = cursor.readString32() else {
+                guard let value = cursor.readStringReference() else {
                     throw OuterframeContentSocketMessageError.truncatedPayload
                 }
                 displayString = value
@@ -1179,6 +1179,89 @@ private func makeContentToBrowserFrame(type: ContentToBrowserMessageKind, payloa
 
 // MARK: - Data Cursor
 
+private struct OffsetPayloadBuilder {
+    private struct Reference {
+        let patchOffset: Int
+        let variableOffset: Int
+        let length: Int
+    }
+
+    private var fixed = Data()
+    private var variable = Data()
+    private var references: [Reference] = []
+
+    mutating func append(uint32 value: UInt32) {
+        fixed.append(uint32: value)
+    }
+
+    mutating func append(int32 value: Int32) {
+        fixed.append(int32: value)
+    }
+
+    mutating func append(uint16 value: UInt16) {
+        fixed.append(uint16: value)
+    }
+
+    mutating func append(uint8 value: UInt8) {
+        fixed.append(uint8: value)
+    }
+
+    mutating func append(uint64 value: UInt64) {
+        fixed.append(uint64: value)
+    }
+
+    mutating func append(float32 value: Float32) {
+        fixed.append(float32: value)
+    }
+
+    mutating func append(uuid: UUID) {
+        fixed.append(uuid: uuid)
+    }
+
+    mutating func append(stringReference string: String) throws {
+        guard let data = string.data(using: .utf8) else {
+            throw OuterframeContentSocketMessageError.encodingFailure("Invalid UTF-8 string")
+        }
+        try append(dataReference: data)
+    }
+
+    mutating func append(dataReference data: Data) throws {
+        guard data.count <= UInt32.max else {
+            throw OuterframeContentSocketMessageError.encodingFailure("Data too long")
+        }
+        let patchOffset = fixed.count
+        fixed.append(uint32: 0)
+        fixed.append(uint32: UInt32(data.count))
+        references.append(Reference(patchOffset: patchOffset,
+                                    variableOffset: variable.count,
+                                    length: data.count))
+        variable.append(data)
+    }
+
+    mutating func finalize() throws -> Data {
+        guard fixed.count <= UInt32.max,
+              variable.count <= UInt32.max,
+              variable.count <= Int(UInt32.max) - fixed.count else {
+            throw OuterframeContentSocketMessageError.encodingFailure("Payload too long")
+        }
+
+        for reference in references {
+            let offset = fixed.count + reference.variableOffset
+            guard offset <= UInt32.max,
+                  reference.length <= UInt32.max else {
+                throw OuterframeContentSocketMessageError.encodingFailure("Payload too long")
+            }
+            fixed.replaceUInt32(at: reference.patchOffset, with: UInt32(offset))
+            fixed.replaceUInt32(at: reference.patchOffset + 4, with: UInt32(reference.length))
+        }
+
+        var payload = Data(capacity: fixed.count + variable.count)
+        payload.append(fixed)
+        payload.append(variable)
+        return payload
+    }
+}
+
 private struct DataCursor {
     private let data: Data
     private var offset: Int = 0
@@ -1238,13 +1321,22 @@ private struct DataCursor {
         return data.subdata(in: range)
     }
 
-    mutating func readData32() -> Data? {
-        guard let length = readUInt32() else { return nil }
-        return readData(Int(length))
+    mutating func readDataReference() -> Data? {
+        guard let offsetValue = readUInt32(),
+              let lengthValue = readUInt32() else {
+            return nil
+        }
+        let start = Int(offsetValue)
+        let length = Int(lengthValue)
+        guard start <= data.count,
+              length <= data.count - start else {
+            return nil
+        }
+        return data.subdata(in: start..<(start + length))
     }
 
-    mutating func readString32() -> String? {
-        guard let data = readData32() else { return nil }
+    mutating func readStringReference() -> String? {
+        guard let data = readDataReference() else { return nil }
         return String(data: data, encoding: .utf8)
     }
 
@@ -1296,19 +1388,10 @@ fileprivate extension Data {
         var uuidValue = uuid.uuid
         Swift.withUnsafeBytes(of: &uuidValue) { append(contentsOf: $0) }
     }
-
-    mutating func append(lengthPrefixedUTF8_32 string: String) throws {
-        guard let data = string.data(using: .utf8) else {
-            throw OuterframeContentSocketMessageError.encodingFailure("Invalid UTF-8 string")
+    mutating func replaceUInt32(at offset: Int, with value: UInt32) {
+        var le = value.littleEndian
+        Swift.withUnsafeBytes(of: &le) {
+            replaceSubrange(offset..<(offset + 4), with: $0)
         }
-        try append(lengthPrefixedData32: data)
-    }
-
-    mutating func append(lengthPrefixedData32 data: Data) throws {
-        guard data.count <= UInt32.max else {
-            throw OuterframeContentSocketMessageError.encodingFailure("Data too long")
-        }
-        append(uint32: UInt32(data.count))
-        append(data)
     }
 }

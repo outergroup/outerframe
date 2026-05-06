@@ -1973,7 +1973,8 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
         }
 
         let outerframeMagic = Data("OUTR".utf8)
-        guard data.count >= outerframeMagic.count + 3 else {
+        let headerLength = 40
+        guard data.count >= headerLength else {
             throw OuterframeLoadError.invalidOuterframeData
         }
 
@@ -1981,27 +1982,46 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
             throw OuterframeLoadError.invalidOuterframeData
         }
 
-        let headerStart = outerframeMagic.count
-        let formatVersion = data[headerStart]
-        guard formatVersion == 0 else {
+        let formatVersion = readOuterframeUInt32(data, at: 4)
+        guard formatVersion == 1 else {
             throw OuterframeLoadError.invalidOuterframeData
         }
 
-        let pathLengthOffset = headerStart + 1
-        let pathLength = UInt16(data[pathLengthOffset]) | (UInt16(data[pathLengthOffset + 1]) << 8)
-        let pathDataStart = pathLengthOffset + MemoryLayout<UInt16>.size
-        let contentBlobStart = pathDataStart + Int(pathLength)
+        let pathOffsetValue = readOuterframeUInt64(data, at: 8)
+        let pathLengthValue = readOuterframeUInt64(data, at: 16)
+        let pluginDataOffsetValue = readOuterframeUInt64(data, at: 24)
+        let pluginDataLengthValue = readOuterframeUInt64(data, at: 32)
 
-        guard data.count >= contentBlobStart else {
+        guard pathOffsetValue <= UInt64(Int.max),
+              pathLengthValue <= UInt64(Int.max),
+              pluginDataOffsetValue <= UInt64(Int.max),
+              pluginDataLengthValue <= UInt64(Int.max) else {
+            throw OuterframeLoadError.invalidOuterframeData
+        }
+
+        let pathOffset = Int(pathOffsetValue)
+        let pathLength = Int(pathLengthValue)
+        let pluginDataOffset = Int(pluginDataOffsetValue)
+        let pluginDataLength = Int(pluginDataLengthValue)
+
+        guard pathOffset >= headerLength,
+              pathOffset <= data.count,
+              pathLength <= data.count - pathOffset else {
             throw OuterframeLoadError.invalidPathLength
         }
 
-        let pathData = data.subdata(in: pathDataStart..<contentBlobStart)
+        guard pluginDataOffset >= headerLength,
+              pluginDataOffset <= data.count,
+              pluginDataLength <= data.count - pluginDataOffset else {
+            throw OuterframeLoadError.invalidOuterframeData
+        }
+
+        let pathData = data.subdata(in: pathOffset..<(pathOffset + pathLength))
         guard let remotePath = String(data: pathData, encoding: .utf8) else {
             throw OuterframeLoadError.invalidRemotePath
         }
 
-        let pluginData = data.subdata(in: contentBlobStart..<data.count)
+        let pluginData = data.subdata(in: pluginDataOffset..<(pluginDataOffset + pluginDataLength))
 
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
             throw OuterframeLoadError.invalidDownloadURL
@@ -2620,5 +2640,22 @@ private final class OuterframeBackgroundVisualEffectView: NSVisualEffectView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
+private func readOuterframeUInt32(_ data: Data, at offset: Int) -> UInt32 {
+    UInt32(data[offset])
+        | (UInt32(data[offset + 1]) << 8)
+        | (UInt32(data[offset + 2]) << 16)
+        | (UInt32(data[offset + 3]) << 24)
+}
+
+private func readOuterframeUInt64(_ data: Data, at offset: Int) -> UInt64 {
+    UInt64(data[offset])
+        | (UInt64(data[offset + 1]) << 8)
+        | (UInt64(data[offset + 2]) << 16)
+        | (UInt64(data[offset + 3]) << 24)
+        | (UInt64(data[offset + 4]) << 32)
+        | (UInt64(data[offset + 5]) << 40)
+        | (UInt64(data[offset + 6]) << 48)
+        | (UInt64(data[offset + 7]) << 56)
+}
 
 extension OuterframeView: OuterframeContentConnectionDelegate {}

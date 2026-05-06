@@ -15,10 +15,10 @@ enum BrowserToContentInfraMessage {
     func encode() throws -> Data {
         switch self {
         case .loadPlugin(let requestID, let pluginURL):
-            var payload = Data()
+            var payload = OffsetPayloadBuilder()
             payload.append(uuid: requestID)
-            try payload.append(lengthPrefixedUTF8_32: pluginURL)
-            return makeBrowserToContentInfraFrame(type: .loadPluginRequest, payload: payload)
+            try payload.append(stringReference: pluginURL)
+            return makeBrowserToContentInfraFrame(type: .loadPluginRequest, payload: try payload.finalize())
 
         case .unloadPlugin:
             return makeBrowserToContentInfraFrame(type: .unloadPluginRequest, payload: Data())
@@ -43,7 +43,7 @@ enum BrowserToContentInfraMessage {
         switch type {
         case .loadPluginRequest:
             guard let requestID = cursor.readUUID(),
-                  let url = cursor.readString32() else {
+                  let url = cursor.readStringReference() else {
                 throw OuterframeContentInfraSocketMessageError.truncatedPayload
             }
             return .loadPlugin(requestID: requestID, pluginURL: url)
@@ -79,10 +79,10 @@ enum ContentToBrowserInfraMessage {
             return makeContentToBrowserInfraFrame(type: .loadPluginSuccess, payload: payload)
 
         case .loadPluginFailure(let requestID, let errorMessage):
-            var payload = Data()
+            var payload = OffsetPayloadBuilder()
             payload.append(uuid: requestID)
-            try payload.append(lengthPrefixedUTF8_32: errorMessage)
-            return makeContentToBrowserInfraFrame(type: .loadPluginFailure, payload: payload)
+            try payload.append(stringReference: errorMessage)
+            return makeContentToBrowserInfraFrame(type: .loadPluginFailure, payload: try payload.finalize())
 
         case .pluginLoaded(let contextID, let success):
             var payload = Data(capacity: 4 + 1)
@@ -114,7 +114,7 @@ enum ContentToBrowserInfraMessage {
 
         case .loadPluginFailure:
             guard let requestID = cursor.readUUID(),
-                  let message = cursor.readString32() else {
+                  let message = cursor.readStringReference() else {
                 throw OuterframeContentInfraSocketMessageError.truncatedPayload
             }
             return .loadPluginFailure(requestID: requestID, errorMessage: message)
@@ -180,6 +180,89 @@ private func makeContentToBrowserInfraFrame(type: ContentToBrowserInfraMessageKi
 
 // MARK: - Data Cursor
 
+private struct OffsetPayloadBuilder {
+    private struct Reference {
+        let patchOffset: Int
+        let variableOffset: Int
+        let length: Int
+    }
+
+    private var fixed = Data()
+    private var variable = Data()
+    private var references: [Reference] = []
+
+    mutating func append(uint32 value: UInt32) {
+        fixed.append(uint32: value)
+    }
+
+    mutating func append(int32 value: Int32) {
+        fixed.append(int32: value)
+    }
+
+    mutating func append(uint16 value: UInt16) {
+        fixed.append(uint16: value)
+    }
+
+    mutating func append(uint8 value: UInt8) {
+        fixed.append(uint8: value)
+    }
+
+    mutating func append(uint64 value: UInt64) {
+        fixed.append(uint64: value)
+    }
+
+    mutating func append(float32 value: Float32) {
+        fixed.append(float32: value)
+    }
+
+    mutating func append(uuid: UUID) {
+        fixed.append(uuid: uuid)
+    }
+
+    mutating func append(stringReference string: String) throws {
+        guard let data = string.data(using: .utf8) else {
+            throw OuterframeContentInfraSocketMessageError.encodingFailure("Invalid UTF-8 string")
+        }
+        try append(dataReference: data)
+    }
+
+    mutating func append(dataReference data: Data) throws {
+        guard data.count <= UInt32.max else {
+            throw OuterframeContentInfraSocketMessageError.encodingFailure("Data too long")
+        }
+        let patchOffset = fixed.count
+        fixed.append(uint32: 0)
+        fixed.append(uint32: UInt32(data.count))
+        references.append(Reference(patchOffset: patchOffset,
+                                    variableOffset: variable.count,
+                                    length: data.count))
+        variable.append(data)
+    }
+
+    mutating func finalize() throws -> Data {
+        guard fixed.count <= UInt32.max,
+              variable.count <= UInt32.max,
+              variable.count <= Int(UInt32.max) - fixed.count else {
+            throw OuterframeContentInfraSocketMessageError.encodingFailure("Payload too long")
+        }
+
+        for reference in references {
+            let offset = fixed.count + reference.variableOffset
+            guard offset <= UInt32.max,
+                  reference.length <= UInt32.max else {
+                throw OuterframeContentInfraSocketMessageError.encodingFailure("Payload too long")
+            }
+            fixed.replaceUInt32(at: reference.patchOffset, with: UInt32(offset))
+            fixed.replaceUInt32(at: reference.patchOffset + 4, with: UInt32(reference.length))
+        }
+
+        var payload = Data(capacity: fixed.count + variable.count)
+        payload.append(fixed)
+        payload.append(variable)
+        return payload
+    }
+}
+
 private struct DataCursor {
     private let data: Data
     private var offset: Int = 0
@@ -239,13 +322,22 @@ private struct DataCursor {
         return data.subdata(in: range)
     }
 
-    mutating func readData32() -> Data? {
-        guard let length = readUInt32() else { return nil }
-        return readData(Int(length))
+    mutating func readDataReference() -> Data? {
+        guard let offsetValue = readUInt32(),
+              let lengthValue = readUInt32() else {
+            return nil
+        }
+        let start = Int(offsetValue)
+        let length = Int(lengthValue)
+        guard start <= data.count,
+              length <= data.count - start else {
+            return nil
+        }
+        return data.subdata(in: start..<(start + length))
     }
 
-    mutating func readString32() -> String? {
-        guard let data = readData32() else { return nil }
+    mutating func readStringReference() -> String? {
+        guard let data = readDataReference() else { return nil }
         return String(data: data, encoding: .utf8)
     }
 
@@ -297,19 +389,10 @@ fileprivate extension Data {
         var uuidValue = uuid.uuid
         Swift.withUnsafeBytes(of: &uuidValue) { append(contentsOf: $0) }
     }
-
-    mutating func append(lengthPrefixedUTF8_32 string: String) throws {
-        guard let data = string.data(using: .utf8) else {
-            throw OuterframeContentInfraSocketMessageError.encodingFailure("Invalid UTF-8 string")
+    mutating func replaceUInt32(at offset: Int, with value: UInt32) {
+        var le = value.littleEndian
+        Swift.withUnsafeBytes(of: &le) {
+            replaceSubrange(offset..<(offset + 4), with: $0)
         }
-        try append(lengthPrefixedData32: data)
-    }
-
-    mutating func append(lengthPrefixedData32 data: Data) throws {
-        guard data.count <= UInt32.max else {
-            throw OuterframeContentInfraSocketMessageError.encodingFailure("Data too long")
-        }
-        append(uint32: UInt32(data.count))
-        append(data)
     }
 }

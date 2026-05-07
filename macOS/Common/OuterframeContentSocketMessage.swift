@@ -1,5 +1,5 @@
 import Foundation
-import AppKit.NSAppearance
+import AppKit
 
 let OuterframeContentSocketHeaderLength = MemoryLayout<UInt32>.size
 let OuterframeContentSocketMessageTypeLength = MemoryLayout<UInt16>.size
@@ -15,8 +15,7 @@ struct InitializeContentProxy {
 
 struct InitializeContentArguments {
     var data: Data?
-    var contentWidth: CGFloat?
-    var contentHeight: CGFloat?
+    var contentSize: CGSize?
     var appearance: NSAppearance?
     var proxy: InitializeContentProxy?
     var url: String?
@@ -24,16 +23,14 @@ struct InitializeContentArguments {
     var windowIsActive: Bool?
 
     init(data: Data? = nil,
-         contentWidth: CGFloat? = nil,
-         contentHeight: CGFloat? = nil,
+         contentSize: CGSize? = nil,
          appearance: NSAppearance? = nil,
          proxy: InitializeContentProxy? = nil,
          url: String? = nil,
          bundleUrl: String? = nil,
          windowIsActive: Bool? = nil) {
         self.data = data
-        self.contentWidth = contentWidth
-        self.contentHeight = contentHeight
+        self.contentSize = contentSize
         self.appearance = appearance
         self.proxy = proxy
         self.url = url
@@ -58,38 +55,37 @@ enum BrowserToContentMessage {
     case initializeContent(args: InitializeContentArguments)
     case displayLinkFired(frameNumber: UInt64, targetTimestamp: Double)
     case displayLinkCallbackRegistered(callbackID: UUID, browserCallbackID: UUID)
-    case resizeContent(width: CGFloat, height: CGFloat)
-    case mouseDown(x: Float32, y: Float32, modifierFlags: UInt64, clickCount: UInt32)
-    case mouseDragged(x: Float32, y: Float32, modifierFlags: UInt64)
-    case mouseUp(x: Float32, y: Float32, modifierFlags: UInt64)
-    case mouseMoved(x: Float32, y: Float32, modifierFlags: UInt64)
-    case rightMouseDown(x: Float32, y: Float32, modifierFlags: UInt64, clickCount: UInt32)
-    case rightMouseUp(x: Float32, y: Float32, modifierFlags: UInt64)
-    case scrollWheelEvent(x: Float32,
-                          y: Float32,
-                          deltaX: Float32,
-                          deltaY: Float32,
-                          modifierFlags: UInt64,
-                          phase: UInt32,
-                          momentumPhase: UInt32,
+    case resizeContent(size: CGSize)
+    case mouseDown(point: CGPoint, modifierFlags: NSEvent.ModifierFlags, clickCount: Int)
+    case mouseDragged(point: CGPoint, modifierFlags: NSEvent.ModifierFlags)
+    case mouseUp(point: CGPoint, modifierFlags: NSEvent.ModifierFlags)
+    case mouseMoved(point: CGPoint, modifierFlags: NSEvent.ModifierFlags)
+    case rightMouseDown(point: CGPoint, modifierFlags: NSEvent.ModifierFlags, clickCount: Int)
+    case rightMouseUp(point: CGPoint, modifierFlags: NSEvent.ModifierFlags)
+    case scrollWheelEvent(point: CGPoint,
+                          delta: CGPoint,
+                          modifierFlags: NSEvent.ModifierFlags,
+                          phase: NSEvent.Phase,
+                          momentumPhase: NSEvent.Phase,
                           hasPreciseScrollingDeltas: Bool)
     case keyDown(keyCode: UInt16,
                  characters: String,
                  charactersIgnoringModifiers: String,
-                 modifierFlags: UInt64,
+                 modifierFlags: NSEvent.ModifierFlags,
                  isARepeat: Bool)
     case keyUp(keyCode: UInt16,
                characters: String,
                charactersIgnoringModifiers: String,
-               modifierFlags: UInt64,
+               modifierFlags: NSEvent.ModifierFlags,
                isARepeat: Bool)
-    case magnification(surfaceID: UInt32, magnification: Float32, x: Float32, y: Float32, scrollX: Float32, scrollY: Float32)
-    case magnificationEnded(surfaceID: UInt32, magnification: Float32, x: Float32, y: Float32, scrollX: Float32, scrollY: Float32)
-    case quickLook(x: Float32, y: Float32)
+    case magnification(surfaceID: UInt32, magnification: CGFloat, location: CGPoint, scrollOffset: CGPoint)
+    case magnificationEnded(surfaceID: UInt32, magnification: CGFloat, location: CGPoint, scrollOffset: CGPoint)
+    case quickLook(point: CGPoint)
     case imageWithSystemSymbolName(requestID: UUID,
-                                   imageData: Data?,
+                                   alphaMaskData: Data?,
                                    width: UInt32,
                                    height: UInt32,
+                                   bytesPerRow: UInt32,
                                    success: Bool,
                                    errorMessage: String?)
     case textInput(text: String,
@@ -126,12 +122,11 @@ enum BrowserToContentMessage {
                 encodedArguments.append(try argPayload.finalize())
             }
 
-            if let contentWidth = arguments.contentWidth,
-               let contentHeight = arguments.contentHeight {
+            if let contentSize = arguments.contentSize {
                 var argPayload = Data(capacity: 1 + 16)
                 argPayload.append(uint8: InitArgKind.contentSize.rawValue)
-                argPayload.append(float64: contentWidth)
-                argPayload.append(float64: contentHeight)
+                argPayload.append(float64: contentSize.width)
+                argPayload.append(float64: contentSize.height)
                 encodedArguments.append(argPayload)
             }
 
@@ -209,48 +204,46 @@ enum BrowserToContentMessage {
             payload.append(uuid: browserCallbackID)
             return makeBrowserToContentFrame(type: .displayLinkCallbackRegistered, payload: payload)
 
-        case .resizeContent(let width, let height):
-            var payload = Data(capacity: 4 + 4)
-            payload.append(float64: width)
-            payload.append(float64: height)
+        case .resizeContent(let size):
+            var payload = Data(capacity: 8 + 8)
+            payload.append(float64: size.width)
+            payload.append(float64: size.height)
             return makeBrowserToContentFrame(type: .resizeContent, payload: payload)
 
-        case .mouseDown(let x, let y, let modifierFlags, let clickCount):
-            return makeMouseEventFrame(type: .mouseDown, x: x, y: y,
+        case .mouseDown(let point, let modifierFlags, let clickCount):
+            return makeMouseEventFrame(type: .mouseDown, point: point,
                                        modifierFlags: modifierFlags, clickCount: clickCount)
 
-        case .mouseDragged(let x, let y, let modifierFlags):
-            return makeMouseEventFrame(type: .mouseDragged, x: x, y: y, modifierFlags: modifierFlags)
+        case .mouseDragged(let point, let modifierFlags):
+            return makeMouseEventFrame(type: .mouseDragged, point: point, modifierFlags: modifierFlags)
 
-        case .mouseUp(let x, let y, let modifierFlags):
-            return makeMouseEventFrame(type: .mouseUp, x: x, y: y, modifierFlags: modifierFlags)
+        case .mouseUp(let point, let modifierFlags):
+            return makeMouseEventFrame(type: .mouseUp, point: point, modifierFlags: modifierFlags)
 
-        case .mouseMoved(let x, let y, let modifierFlags):
-            return makeMouseEventFrame(type: .mouseMoved, x: x, y: y, modifierFlags: modifierFlags)
+        case .mouseMoved(let point, let modifierFlags):
+            return makeMouseEventFrame(type: .mouseMoved, point: point, modifierFlags: modifierFlags)
 
-        case .rightMouseDown(let x, let y, let modifierFlags, let clickCount):
-            return makeMouseEventFrame(type: .rightMouseDown, x: x, y: y,
+        case .rightMouseDown(let point, let modifierFlags, let clickCount):
+            return makeMouseEventFrame(type: .rightMouseDown, point: point,
                                        modifierFlags: modifierFlags, clickCount: clickCount)
 
-        case .rightMouseUp(let x, let y, let modifierFlags):
-            return makeMouseEventFrame(type: .rightMouseUp, x: x, y: y, modifierFlags: modifierFlags)
+        case .rightMouseUp(let point, let modifierFlags):
+            return makeMouseEventFrame(type: .rightMouseUp, point: point, modifierFlags: modifierFlags)
 
-        case .scrollWheelEvent(let x,
-                               let y,
-                               let deltaX,
-                               let deltaY,
+        case .scrollWheelEvent(let point,
+                               let delta,
                                let modifierFlags,
-                               let phaseRaw,
-                               let momentumPhaseRaw,
+                               let phase,
+                               let momentumPhase,
                                let hasPreciseScrollingDeltas):
-            var payload = Data(capacity: 4 * 4 + 8 + 4 + 4 + 1)
-            payload.append(float32: x)
-            payload.append(float32: y)
-            payload.append(float32: deltaX)
-            payload.append(float32: deltaY)
-            payload.append(uint64: modifierFlags)
-            payload.append(uint32: phaseRaw)
-            payload.append(uint32: momentumPhaseRaw)
+            var payload = Data(capacity: 8 * 4 + 8 + 4 + 4 + 1)
+            payload.append(float64: point.x)
+            payload.append(float64: point.y)
+            payload.append(float64: delta.x)
+            payload.append(float64: delta.y)
+            payload.append(uint64: UInt64(modifierFlags.rawValue))
+            payload.append(uint32: UInt32(truncatingIfNeeded: phase.rawValue))
+            payload.append(uint32: UInt32(truncatingIfNeeded: momentumPhase.rawValue))
             var flags: UInt8 = 0
             if hasPreciseScrollingDeltas { flags |= 1 << 0 }
             payload.append(uint8: flags)
@@ -261,7 +254,7 @@ enum BrowserToContentMessage {
             payload.append(uint16: keyCode)
             try payload.append(stringReference: characters)
             try payload.append(stringReference: charactersIgnoringModifiers)
-            payload.append(uint64: modifierFlags)
+            payload.append(uint64: UInt64(modifierFlags.rawValue))
             payload.append(uint8: isARepeat ? 1 << 0 : 0)
             return makeBrowserToContentFrame(type: .keyDown, payload: try payload.finalize())
 
@@ -270,47 +263,48 @@ enum BrowserToContentMessage {
             payload.append(uint16: keyCode)
             try payload.append(stringReference: characters)
             try payload.append(stringReference: charactersIgnoringModifiers)
-            payload.append(uint64: modifierFlags)
+            payload.append(uint64: UInt64(modifierFlags.rawValue))
             payload.append(uint8: isARepeat ? 1 << 0 : 0)
             return makeBrowserToContentFrame(type: .keyUp, payload: try payload.finalize())
 
-        case .magnification(let surfaceID, let magnification, let x, let y, let scrollX, let scrollY):
+        case .magnification(let surfaceID, let magnification, let location, let scrollOffset):
             var payload = Data()
             payload.append(uint32: surfaceID)
-            payload.append(float32: magnification)
-            payload.append(float32: x)
-            payload.append(float32: y)
-            payload.append(float32: scrollX)
-            payload.append(float32: scrollY)
+            payload.append(float64: magnification)
+            payload.append(float64: location.x)
+            payload.append(float64: location.y)
+            payload.append(float64: scrollOffset.x)
+            payload.append(float64: scrollOffset.y)
             return makeBrowserToContentFrame(type: .magnification, payload: payload)
 
-        case .magnificationEnded(let surfaceID, let magnification, let x, let y, let scrollX, let scrollY):
+        case .magnificationEnded(let surfaceID, let magnification, let location, let scrollOffset):
             var payload = Data()
             payload.append(uint32: surfaceID)
-            payload.append(float32: magnification)
-            payload.append(float32: x)
-            payload.append(float32: y)
-            payload.append(float32: scrollX)
-            payload.append(float32: scrollY)
+            payload.append(float64: magnification)
+            payload.append(float64: location.x)
+            payload.append(float64: location.y)
+            payload.append(float64: scrollOffset.x)
+            payload.append(float64: scrollOffset.y)
             return makeBrowserToContentFrame(type: .magnificationEnded, payload: payload)
 
-        case .quickLook(let x, let y):
-            var payload = Data(capacity: 4 + 4)
-            payload.append(float32: x)
-            payload.append(float32: y)
+        case .quickLook(let point):
+            var payload = Data(capacity: 8 + 8)
+            payload.append(float64: point.x)
+            payload.append(float64: point.y)
             return makeBrowserToContentFrame(type: .quickLook, payload: payload)
 
-        case .imageWithSystemSymbolName(let requestID, let imageData, let width, let height, let success, let errorMessage):
+        case .imageWithSystemSymbolName(let requestID, let alphaMaskData, let width, let height, let bytesPerRow, let success, let errorMessage):
             var payload = OffsetPayloadBuilder()
             payload.append(uuid: requestID)
             payload.append(uint32: width)
             payload.append(uint32: height)
+            payload.append(uint32: bytesPerRow)
             var flags: UInt8 = 0
             if success { flags |= 1 << 0 }
-            if imageData != nil { flags |= 1 << 1 }
+            if alphaMaskData != nil { flags |= 1 << 1 }
             if errorMessage != nil { flags |= 1 << 2 }
             payload.append(uint8: flags)
-            try payload.append(dataReference: imageData ?? Data())
+            try payload.append(dataReference: alphaMaskData ?? Data())
             try payload.append(stringReference: errorMessage ?? "")
             return makeBrowserToContentFrame(type: .imageWithSystemSymbolName, payload: try payload.finalize())
 
@@ -439,8 +433,7 @@ enum BrowserToContentMessage {
                           let height = argCursor.readFloat64() else {
                         throw OuterframeContentSocketMessageError.truncatedPayload
                     }
-                    arguments.contentWidth = width
-                    arguments.contentHeight = height
+                    arguments.contentSize = CGSize(width: width, height: height)
 
                 case .appearance:
                     guard let appearanceData = argCursor.readDataReference(),
@@ -525,48 +518,50 @@ enum BrowserToContentMessage {
                   let height = cursor.readFloat64() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
             }
-            return .resizeContent(width: width, height: height)
+            return .resizeContent(size: CGSize(width: width, height: height))
 
         case .mouseDown:
             let event = try readMouseEvent(cursor: &cursor, includesClickCount: true)
-            return .mouseDown(x: event.x, y: event.y,
+            return .mouseDown(point: event.point,
                               modifierFlags: event.modifierFlags, clickCount: event.clickCount)
 
         case .mouseDragged:
             let event = try readMouseEvent(cursor: &cursor, includesClickCount: false)
-            return .mouseDragged(x: event.x, y: event.y, modifierFlags: event.modifierFlags)
+            return .mouseDragged(point: event.point, modifierFlags: event.modifierFlags)
 
         case .mouseUp:
             let event = try readMouseEvent(cursor: &cursor, includesClickCount: false)
-            return .mouseUp(x: event.x, y: event.y, modifierFlags: event.modifierFlags)
+            return .mouseUp(point: event.point, modifierFlags: event.modifierFlags)
 
         case .mouseMoved:
             let event = try readMouseEvent(cursor: &cursor, includesClickCount: false)
-            return .mouseMoved(x: event.x, y: event.y, modifierFlags: event.modifierFlags)
+            return .mouseMoved(point: event.point, modifierFlags: event.modifierFlags)
 
         case .rightMouseDown:
             let event = try readMouseEvent(cursor: &cursor, includesClickCount: true)
-            return .rightMouseDown(x: event.x, y: event.y,
+            return .rightMouseDown(point: event.point,
                                    modifierFlags: event.modifierFlags, clickCount: event.clickCount)
 
         case .rightMouseUp:
             let event = try readMouseEvent(cursor: &cursor, includesClickCount: false)
-            return .rightMouseUp(x: event.x, y: event.y, modifierFlags: event.modifierFlags)
+            return .rightMouseUp(point: event.point, modifierFlags: event.modifierFlags)
 
         case .scrollWheelEvent:
-            guard let x = cursor.readFloat32(),
-                  let y = cursor.readFloat32(),
-                  let deltaX = cursor.readFloat32(),
-                  let deltaY = cursor.readFloat32(),
+            guard let x = cursor.readFloat64(),
+                  let y = cursor.readFloat64(),
+                  let deltaX = cursor.readFloat64(),
+                  let deltaY = cursor.readFloat64(),
                   let modifierFlags = cursor.readUInt64(),
                   let phaseRaw = cursor.readUInt32(),
                   let momentumPhaseRaw = cursor.readUInt32(),
                   let flags = cursor.readUInt8() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
             }
-            return .scrollWheelEvent(x: x, y: y, deltaX: deltaX, deltaY: deltaY,
-                                     modifierFlags: modifierFlags, phase: phaseRaw,
-                                     momentumPhase: momentumPhaseRaw,
+            return .scrollWheelEvent(point: CGPoint(x: x, y: y),
+                                     delta: CGPoint(x: deltaX, y: deltaY),
+                                     modifierFlags: NSEvent.ModifierFlags(rawValue: UInt(modifierFlags)),
+                                     phase: NSEvent.Phase(rawValue: UInt(phaseRaw)),
+                                     momentumPhase: NSEvent.Phase(rawValue: UInt(momentumPhaseRaw)),
                                      hasPreciseScrollingDeltas: flags & (1 << 0) != 0)
 
         case .keyDown:
@@ -579,7 +574,8 @@ enum BrowserToContentMessage {
             }
             return .keyDown(keyCode: keyCode, characters: characters,
                             charactersIgnoringModifiers: charactersIgnoringModifiers,
-                            modifierFlags: modifierFlags, isARepeat: flags & (1 << 0) != 0)
+                            modifierFlags: NSEvent.ModifierFlags(rawValue: UInt(modifierFlags)),
+                            isARepeat: flags & (1 << 0) != 0)
 
         case .keyUp:
             guard let keyCode = cursor.readUInt16(),
@@ -591,54 +587,58 @@ enum BrowserToContentMessage {
             }
             return .keyUp(keyCode: keyCode, characters: characters,
                           charactersIgnoringModifiers: charactersIgnoringModifiers,
-                          modifierFlags: modifierFlags, isARepeat: flags & (1 << 0) != 0)
+                          modifierFlags: NSEvent.ModifierFlags(rawValue: UInt(modifierFlags)),
+                          isARepeat: flags & (1 << 0) != 0)
 
         case .magnification:
             guard let surfaceID = cursor.readUInt32(),
-                  let magnification = cursor.readFloat32(),
-                  let x = cursor.readFloat32(),
-                  let y = cursor.readFloat32(),
-                  let scrollX = cursor.readFloat32(),
-                  let scrollY = cursor.readFloat32() else {
+                  let magnification = cursor.readFloat64(),
+                  let x = cursor.readFloat64(),
+                  let y = cursor.readFloat64(),
+                  let scrollX = cursor.readFloat64(),
+                  let scrollY = cursor.readFloat64() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
             }
             return .magnification(surfaceID: surfaceID, magnification: magnification,
-                                  x: x, y: y, scrollX: scrollX, scrollY: scrollY)
+                                  location: CGPoint(x: x, y: y),
+                                  scrollOffset: CGPoint(x: scrollX, y: scrollY))
 
         case .magnificationEnded:
             guard let surfaceID = cursor.readUInt32(),
-                  let magnification = cursor.readFloat32(),
-                  let x = cursor.readFloat32(),
-                  let y = cursor.readFloat32(),
-                  let scrollX = cursor.readFloat32(),
-                  let scrollY = cursor.readFloat32() else {
+                  let magnification = cursor.readFloat64(),
+                  let x = cursor.readFloat64(),
+                  let y = cursor.readFloat64(),
+                  let scrollX = cursor.readFloat64(),
+                  let scrollY = cursor.readFloat64() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
             }
             return .magnificationEnded(surfaceID: surfaceID, magnification: magnification,
-                                       x: x, y: y, scrollX: scrollX, scrollY: scrollY)
+                                       location: CGPoint(x: x, y: y),
+                                       scrollOffset: CGPoint(x: scrollX, y: scrollY))
 
         case .quickLook:
-            guard let x = cursor.readFloat32(),
-                  let y = cursor.readFloat32() else {
+            guard let x = cursor.readFloat64(),
+                  let y = cursor.readFloat64() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
             }
-            return .quickLook(x: x, y: y)
+            return .quickLook(point: CGPoint(x: x, y: y))
 
         case .imageWithSystemSymbolName:
             guard let requestID = cursor.readUUID(),
                   let width = cursor.readUInt32(),
                   let height = cursor.readUInt32(),
+                  let bytesPerRow = cursor.readUInt32(),
                   let flags = cursor.readUInt8(),
-                  let imageDataReference = cursor.readDataReference(),
+                  let alphaMaskDataReference = cursor.readDataReference(),
                   let errorMessageReference = cursor.readStringReference() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
             }
 
-            let imageData = flags & (1 << 1) != 0 ? imageDataReference : nil
+            let alphaMaskData = flags & (1 << 1) != 0 ? alphaMaskDataReference : nil
             let errorMessage = flags & (1 << 2) != 0 ? errorMessageReference : nil
 
-            return .imageWithSystemSymbolName(requestID: requestID, imageData: imageData,
-                                     width: width, height: height,
+            return .imageWithSystemSymbolName(requestID: requestID, alphaMaskData: alphaMaskData,
+                                     width: width, height: height, bytesPerRow: bytesPerRow,
                                      success: flags & (1 << 0) != 0, errorMessage: errorMessage)
 
         case .textInput:
@@ -751,20 +751,16 @@ enum ContentToBrowserMessage {
     case stopDisplayLink(browserCallbackID: UUID)
     case cursorUpdate(cursorType: UInt8)
     case inputModeUpdate(inputMode: UInt8)
-    case showContextMenu(attributedTextData: Data, locationX: Float32, locationY: Float32)
-    case showDefinition(attributedTextData: Data, locationX: Float32, locationY: Float32)
+    case showContextMenu(attributedTextData: Data, locationX: CGFloat, locationY: CGFloat)
+    case showDefinition(attributedTextData: Data, locationX: CGFloat, locationY: CGFloat)
     case getImageWithSystemSymbolName(requestID: UUID,
                                       symbolName: String,
-                                      pointSize: Float32,
-                                      weight: String,
-                                      scale: Float32,
-                                      tintRed: Float32,
-                                      tintGreen: Float32,
-                                      tintBlue: Float32,
-                                      tintAlpha: Float32)
+                                      pointSize: CGFloat,
+                                      weight: Float64,
+                                      scale: CGFloat)
     case textCursorUpdate(cursors: [OuterframeContentTextCursorSnapshot])
     case copySelectedPasteboardResponse(requestID: UUID, items: [OuterframeContentPasteboardItem])
-    case openNewWindow(url: String, displayString: String?, preferredWidth: Float32?, preferredHeight: Float32?)
+    case openNewWindow(url: String, displayString: String?, preferredSize: CGSize?)
     case setPasteboardCapabilities(canCopy: Bool, canCut: Bool, pasteboardTypes: [String])
     case accessibilitySnapshotResponse(requestID: UUID, snapshotData: Data?)
     case accessibilityTreeChanged(notificationMask: UInt8)
@@ -794,30 +790,25 @@ enum ContentToBrowserMessage {
 
         case .showContextMenu(let attributedTextData, let locationX, let locationY):
             var payload = OffsetPayloadBuilder()
-            payload.append(float32: locationX)
-            payload.append(float32: locationY)
+            payload.append(float64: locationX)
+            payload.append(float64: locationY)
             try payload.append(dataReference: attributedTextData)
             return makeContentToBrowserFrame(type: .showContextMenu, payload: try payload.finalize())
 
         case .showDefinition(let attributedTextData, let locationX, let locationY):
             var payload = OffsetPayloadBuilder()
-            payload.append(float32: locationX)
-            payload.append(float32: locationY)
+            payload.append(float64: locationX)
+            payload.append(float64: locationY)
             try payload.append(dataReference: attributedTextData)
             return makeContentToBrowserFrame(type: .showDefinition, payload: try payload.finalize())
 
-        case .getImageWithSystemSymbolName(let requestID, let symbolName, let pointSize, let weight,
-                              let scale, let tintRed, let tintGreen, let tintBlue, let tintAlpha):
+        case .getImageWithSystemSymbolName(let requestID, let symbolName, let pointSize, let weight, let scale):
             var payload = OffsetPayloadBuilder()
             payload.append(uuid: requestID)
             try payload.append(stringReference: symbolName)
-            payload.append(float32: pointSize)
-            try payload.append(stringReference: weight)
-            payload.append(float32: scale)
-            payload.append(float32: tintRed)
-            payload.append(float32: tintGreen)
-            payload.append(float32: tintBlue)
-            payload.append(float32: tintAlpha)
+            payload.append(float64: pointSize)
+            payload.append(float64: weight)
+            payload.append(float64: scale)
             return makeContentToBrowserFrame(type: .getImageWithSystemSymbolName, payload: try payload.finalize())
 
         case .textCursorUpdate(let cursors):
@@ -826,10 +817,10 @@ enum ContentToBrowserMessage {
             payload.append(uint32: countValue)
             for cursor in cursors {
                 payload.append(uuid: cursor.fieldID)
-                payload.append(float32: cursor.rectX)
-                payload.append(float32: cursor.rectY)
-                payload.append(float32: cursor.rectWidth)
-                payload.append(float32: cursor.rectHeight)
+                payload.append(float64: cursor.rect.origin.x)
+                payload.append(float64: cursor.rect.origin.y)
+                payload.append(float64: cursor.rect.size.width)
+                payload.append(float64: cursor.rect.size.height)
                 payload.append(uint8: cursor.visible ? 1 << 0 : 0)
             }
             return makeContentToBrowserFrame(type: .textCursorUpdate, payload: payload)
@@ -845,16 +836,16 @@ enum ContentToBrowserMessage {
             }
             return makeContentToBrowserFrame(type: .copySelectedPasteboardResponse, payload: try payload.finalize())
 
-        case .openNewWindow(let url, let displayString, let preferredWidth, let preferredHeight):
+        case .openNewWindow(let url, let displayString, let preferredSize):
             var payload = OffsetPayloadBuilder()
             try payload.append(stringReference: url)
             var flags: UInt8 = 0
             if displayString != nil { flags |= 1 << 0 }
-            if preferredWidth != nil && preferredHeight != nil { flags |= 1 << 1 }
+            if preferredSize != nil { flags |= 1 << 1 }
             payload.append(uint8: flags)
             try payload.append(stringReference: displayString ?? "")
-            payload.append(float32: preferredWidth ?? 0)
-            payload.append(float32: preferredHeight ?? 0)
+            payload.append(float64: preferredSize.map { Float64($0.width) } ?? 0)
+            payload.append(float64: preferredSize.map { Float64($0.height) } ?? 0)
             return makeContentToBrowserFrame(type: .openNewWindow, payload: try payload.finalize())
 
         case .setPasteboardCapabilities(let canCopy, let canCut, let pasteboardTypes):
@@ -924,8 +915,8 @@ enum ContentToBrowserMessage {
             return .inputModeUpdate(inputMode: inputMode)
 
         case .showContextMenu:
-            guard let locationX = cursor.readFloat32(),
-                  let locationY = cursor.readFloat32(),
+            guard let locationX = cursor.readFloat64(),
+                  let locationY = cursor.readFloat64(),
                   let attributedTextData = cursor.readDataReference() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
             }
@@ -933,8 +924,8 @@ enum ContentToBrowserMessage {
                                     locationX: locationX, locationY: locationY)
 
         case .showDefinition:
-            guard let locationX = cursor.readFloat32(),
-                  let locationY = cursor.readFloat32(),
+            guard let locationX = cursor.readFloat64(),
+                  let locationY = cursor.readFloat64(),
                   let attributedTextData = cursor.readDataReference() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
             }
@@ -944,19 +935,13 @@ enum ContentToBrowserMessage {
         case .getImageWithSystemSymbolName:
             guard let requestID = cursor.readUUID(),
                   let symbolName = cursor.readStringReference(),
-                  let pointSize = cursor.readFloat32(),
-                  let weight = cursor.readStringReference(),
-                  let scale = cursor.readFloat32(),
-                  let tintRed = cursor.readFloat32(),
-                  let tintGreen = cursor.readFloat32(),
-                  let tintBlue = cursor.readFloat32(),
-                  let tintAlpha = cursor.readFloat32() else {
+                  let pointSize = cursor.readFloat64(),
+                  let weight = cursor.readFloat64(),
+                  let scale = cursor.readFloat64() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
             }
             return .getImageWithSystemSymbolName(requestID: requestID, symbolName: symbolName,
-                                    pointSize: pointSize, weight: weight, scale: scale,
-                                    tintRed: tintRed, tintGreen: tintGreen,
-                                    tintBlue: tintBlue, tintAlpha: tintAlpha)
+                                    pointSize: pointSize, weight: weight, scale: scale)
 
         case .textCursorUpdate:
             guard let cursorCount = cursor.readUInt32() else {
@@ -966,17 +951,19 @@ enum ContentToBrowserMessage {
             entries.reserveCapacity(Int(cursorCount))
             for _ in 0..<cursorCount {
                 guard let fieldID = cursor.readUUID(),
-                      let rectX = cursor.readFloat32(),
-                      let rectY = cursor.readFloat32(),
-                      let rectWidth = cursor.readFloat32(),
-                      let rectHeight = cursor.readFloat32(),
+                      let rectX = cursor.readFloat64(),
+                      let rectY = cursor.readFloat64(),
+                      let rectWidth = cursor.readFloat64(),
+                      let rectHeight = cursor.readFloat64(),
                       let flags = cursor.readUInt8() else {
                     throw OuterframeContentSocketMessageError.truncatedPayload
                 }
                 entries.append(OuterframeContentTextCursorSnapshot(fieldID: fieldID,
-                                                              rectX: rectX, rectY: rectY,
-                                                              rectWidth: rectWidth, rectHeight: rectHeight,
-                                                              visible: flags & (1 << 0) != 0))
+                                                                   rect: CGRect(x: rectX,
+                                                                                y: rectY,
+                                                                                width: rectWidth,
+                                                                                height: rectHeight),
+                                                                   visible: flags & (1 << 0) != 0))
             }
             return .textCursorUpdate(cursors: entries)
 
@@ -1038,15 +1025,14 @@ enum ContentToBrowserMessage {
             guard let url = cursor.readStringReference(),
                   let flags = cursor.readUInt8(),
                   let displayStringReference = cursor.readStringReference(),
-                  let width = cursor.readFloat32(),
-                  let height = cursor.readFloat32() else {
+                  let width = cursor.readFloat64(),
+                  let height = cursor.readFloat64() else {
                 throw OuterframeContentSocketMessageError.truncatedPayload
             }
             let displayString = flags & (1 << 0) != 0 ? displayStringReference : nil
-            let widthValue = flags & (1 << 1) != 0 ? width : nil
-            let heightValue = flags & (1 << 1) != 0 ? height : nil
+            let preferredSize = flags & (1 << 1) != 0 ? CGSize(width: width, height: height) : nil
             return .openNewWindow(url: url, displayString: displayString,
-                                  preferredWidth: widthValue, preferredHeight: heightValue)
+                                  preferredSize: preferredSize)
         }
     }
 }
@@ -1055,10 +1041,7 @@ enum ContentToBrowserMessage {
 
 struct OuterframeContentTextCursorSnapshot: Sendable {
     let fieldID: UUID
-    let rectX: Float32
-    let rectY: Float32
-    let rectWidth: Float32
-    let rectHeight: Float32
+    let rect: CGRect
     let visible: Bool
 }
 
@@ -1151,24 +1134,23 @@ private func makeContentToBrowserFrame(type: ContentToBrowserMessageKind, payloa
 }
 
 private func makeMouseEventFrame(type: BrowserToContentMessageKind,
-                                 x: Float32,
-                                 y: Float32,
-                                 modifierFlags: UInt64,
-                                 clickCount: UInt32? = nil) -> Data {
-    var payload = Data(capacity: clickCount == nil ? 16 : 20)
-    payload.append(float32: x)
-    payload.append(float32: y)
-    payload.append(uint64: modifierFlags)
+                                 point: CGPoint,
+                                 modifierFlags: NSEvent.ModifierFlags,
+                                 clickCount: Int? = nil) -> Data {
+    var payload = Data(capacity: clickCount == nil ? 24 : 28)
+    payload.append(float64: point.x)
+    payload.append(float64: point.y)
+    payload.append(uint64: UInt64(modifierFlags.rawValue))
     if let clickCount {
-        payload.append(uint32: clickCount)
+        payload.append(uint32: UInt32(truncatingIfNeeded: clickCount))
     }
     return makeBrowserToContentFrame(type: type, payload: payload)
 }
 
 private func readMouseEvent(cursor: inout DataCursor,
-                            includesClickCount: Bool) throws -> (x: Float32, y: Float32, modifierFlags: UInt64, clickCount: UInt32) {
-    guard let x = cursor.readFloat32(),
-          let y = cursor.readFloat32(),
+                            includesClickCount: Bool) throws -> (point: CGPoint, modifierFlags: NSEvent.ModifierFlags, clickCount: Int) {
+    guard let x = cursor.readFloat64(),
+          let y = cursor.readFloat64(),
           let modifierFlags = cursor.readUInt64() else {
         throw OuterframeContentSocketMessageError.truncatedPayload
     }
@@ -1176,9 +1158,9 @@ private func readMouseEvent(cursor: inout DataCursor,
         guard let clickCount = cursor.readUInt32() else {
             throw OuterframeContentSocketMessageError.truncatedPayload
         }
-        return (x, y, modifierFlags, clickCount)
+        return (CGPoint(x: x, y: y), NSEvent.ModifierFlags(rawValue: UInt(modifierFlags)), Int(clickCount))
     }
-    return (x, y, modifierFlags, 0)
+    return (CGPoint(x: x, y: y), NSEvent.ModifierFlags(rawValue: UInt(modifierFlags)), 0)
 }
 
 // MARK: - Data Cursor
@@ -1221,6 +1203,10 @@ private struct OffsetPayloadBuilder {
 
     mutating func append(float32 value: Float32) {
         fixed.append(float32: value)
+    }
+
+    mutating func append(float64 value: Double) {
+        fixed.append(float64: value)
     }
 
     mutating func append(uuid: UUID) {

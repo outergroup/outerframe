@@ -631,10 +631,10 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
 
         for cursor in cursors {
             let fieldID = cursor.fieldID
-            let x = CGFloat(cursor.rectX)
-            let y = CGFloat(cursor.rectY)
-            let width = CGFloat(cursor.rectWidth)
-            let height = CGFloat(cursor.rectHeight)
+            let x = cursor.rect.origin.x
+            let y = cursor.rect.origin.y
+            let width = cursor.rect.size.width
+            let height = cursor.rect.size.height
             let visible = cursor.visible
 
             let indicator: NSTextInsertionIndicator
@@ -1243,7 +1243,7 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
         let size = bounds.size
 
         withActivePluginConnection { connection in
-            connection.resizeContent(width: size.width, height: size.height)
+            connection.resizeContent(size: size)
         }
     }
 
@@ -1497,37 +1497,41 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
 
     public func handleMouseDown(at point: CGPoint, modifierFlags: NSEvent.ModifierFlags, clickCount: Int) {
         withActivePluginConnection { connection in
-            connection.sendMouseEvent(type: .down, point: point, modifierFlags: modifierFlags, clickCount: clickCount)
+            connection.sendToOuterframeContent(.mouseDown(point: point,
+                                                          modifierFlags: modifierFlags,
+                                                          clickCount: clickCount))
         }
     }
 
     public func handleMouseDragged(to point: CGPoint, modifierFlags: NSEvent.ModifierFlags) {
         withActivePluginConnection { connection in
-            connection.sendMouseEvent(type: .dragged, point: point, modifierFlags: modifierFlags)
+            connection.sendToOuterframeContent(.mouseDragged(point: point,
+                                                             modifierFlags: modifierFlags))
         }
     }
 
     public func handleMouseUp(at point: CGPoint, modifierFlags: NSEvent.ModifierFlags) {
         withActivePluginConnection { connection in
-            connection.sendMouseEvent(type: .up, point: point, modifierFlags: modifierFlags)
+            connection.sendToOuterframeContent(.mouseUp(point: point,
+                                                        modifierFlags: modifierFlags))
         }
     }
 
     public func handleMouseMoved(to point: CGPoint, modifierFlags: NSEvent.ModifierFlags) {
         withActivePluginConnection { connection in
-            connection.sendMouseEvent(type: .moved, point: point, modifierFlags: modifierFlags)
+            connection.sendToOuterframeContent(.mouseMoved(point: point,
+                                                           modifierFlags: modifierFlags))
         }
     }
 
     public func handleScrollWheel(at point: CGPoint, with event: NSEvent) {
         withActivePluginConnection { connection in
-            let delta = CGPoint(x: event.scrollingDeltaX, y: event.scrollingDeltaY)
-            connection.sendScrollWheelEvent(point: point,
-                                            delta: delta,
-                                            modifierFlags: event.modifierFlags,
-                                            phase: event.phase,
-                                            momentumPhase: event.momentumPhase,
-                                            hasPreciseScrollingDeltas: event.hasPreciseScrollingDeltas)
+            connection.sendToOuterframeContent(.scrollWheelEvent(point: point,
+                                                                 delta: CGPoint(x: event.scrollingDeltaX, y: event.scrollingDeltaY),
+                                                                 modifierFlags: event.modifierFlags,
+                                                                 phase: event.phase,
+                                                                 momentumPhase: event.momentumPhase,
+                                                                 hasPreciseScrollingDeltas: event.hasPreciseScrollingDeltas))
         }
     }
 
@@ -1552,20 +1556,23 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
 
     func handleRightMouseDown(at point: CGPoint, modifierFlags: NSEvent.ModifierFlags, clickCount: Int) {
         withActivePluginConnection { connection in
-            connection.sendMouseEvent(type: .rightDown, point: point, modifierFlags: modifierFlags, clickCount: clickCount)
+            connection.sendToOuterframeContent(.rightMouseDown(point: point,
+                                                               modifierFlags: modifierFlags,
+                                                               clickCount: clickCount))
         }
     }
 
     public func handleRightMouseUp(at point: CGPoint, modifierFlags: NSEvent.ModifierFlags) {
         withActivePluginConnection { connection in
-            connection.sendMouseEvent(type: .rightUp, point: point, modifierFlags: modifierFlags)
+            connection.sendToOuterframeContent(.rightMouseUp(point: point,
+                                                             modifierFlags: modifierFlags))
         }
     }
 
 
     public func handleQuickLook(at point: CGPoint) {
         withActivePluginConnection { connection in
-            connection.sendQuickLookEvent(point: point)
+            connection.sendToOuterframeContent(.quickLook(point: point))
         }
     }
 
@@ -1574,7 +1581,11 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
         withActivePluginConnection { connection in
             let characters = event.characters ?? ""
             let charactersIgnoringModifiers = event.charactersIgnoringModifiers ?? ""
-            connection.sendKeyDown(keyCode: event.keyCode, characters: characters, charactersIgnoringModifiers: charactersIgnoringModifiers, modifierFlags: event.modifierFlags, isARepeat: event.isARepeat)
+            connection.sendToOuterframeContent(.keyDown(keyCode: event.keyCode,
+                                                        characters: characters,
+                                                        charactersIgnoringModifiers: charactersIgnoringModifiers,
+                                                        modifierFlags: event.modifierFlags,
+                                                        isARepeat: event.isARepeat))
         }
     }
 
@@ -1583,7 +1594,11 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
         withActivePluginConnection { connection in
             let characters = event.characters ?? ""
             let charactersIgnoringModifiers = event.charactersIgnoringModifiers ?? ""
-            connection.sendKeyUp(keyCode: event.keyCode, characters: characters, charactersIgnoringModifiers: charactersIgnoringModifiers, modifierFlags: event.modifierFlags, isARepeat: event.isARepeat)
+            connection.sendToOuterframeContent(.keyUp(keyCode: event.keyCode,
+                                                      characters: characters,
+                                                      charactersIgnoringModifiers: charactersIgnoringModifiers,
+                                                      modifierFlags: event.modifierFlags,
+                                                      isARepeat: event.isARepeat))
         }
     }
 

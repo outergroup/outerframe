@@ -88,169 +88,257 @@ public struct OuterframeAccessibilitySnapshot: Sendable {
 
     /// Serialises the snapshot to the binary format shared with the host.
     public func serializedData() -> Data {
-        var data = Data()
-        data.appendUInt8(1) // format version
-        let clampedCount = UInt16(max(0, min(rootNodes.count, Int(UInt16.max))))
-        data.appendUInt16(clampedCount)
-        for node in rootNodes.prefix(Int(clampedCount)) {
-            encode(node: node, into: &data)
+        let flattenedNodes = flattenedNodes()
+        let nodeRecordsOffset = Self.headerSize
+        let nodeRecordsSize = flattenedNodes.count * Self.nodeRecordSize
+        let variableDataOffset = nodeRecordsOffset + nodeRecordsSize
+
+        var stringData = Data()
+        var nodeRecords = Data(capacity: nodeRecordsSize)
+        for flattenedNode in flattenedNodes {
+            encode(flattenedNode: flattenedNode,
+                   variableDataOffset: variableDataOffset,
+                   stringData: &stringData,
+                   nodeRecords: &nodeRecords)
         }
+
+        var data = Data(capacity: Self.headerSize + nodeRecords.count + stringData.count)
+        data.appendUInt32(Self.formatVersion)
+        data.appendUInt32(UInt32(Self.nodeRecordSize))
+        data.appendUInt64(UInt64(nodeRecordsOffset))
+        data.appendUInt64(UInt64(flattenedNodes.count))
+        data.append(nodeRecords)
+        data.append(stringData)
         return data
     }
 
     /// Deserialises a snapshot from binary payload produced by `serializedData`.
     public static func deserialize(from data: Data) -> OuterframeAccessibilitySnapshot? {
-        var cursor = AccessibilityDataCursor(data: data)
-        guard let version = cursor.readUInt8(), version == 1 else {
-            return nil
-        }
-        guard let rootCount = cursor.readUInt16() else {
+        guard data.count >= headerSize,
+              let version = data.readUInt32(at: 0),
+              version == formatVersion,
+              let nodeRecordSizeRaw = data.readUInt32(at: 4),
+	              let nodeRecordsOffsetRaw = data.readUInt64(at: 8),
+	              let nodeCountRaw = data.readUInt64(at: 16),
+	              nodeRecordSizeRaw >= minimumNodeRecordSize,
+	              let nodeRecordSize = Int(exactly: nodeRecordSizeRaw),
+	              let nodeRecordsOffset = Int(exactly: nodeRecordsOffsetRaw),
+	              let nodeCount = Int(exactly: nodeCountRaw),
+	              nodeCount <= maximumNodeCount else {
+	            return nil
+	        }
+
+	        let nodeRecordsSize = nodeCount.multipliedReportingOverflow(by: nodeRecordSize)
+        guard !nodeRecordsSize.overflow else { return nil }
+        let nodeRecordsEnd = nodeRecordsOffset.addingReportingOverflow(nodeRecordsSize.partialValue)
+        guard !nodeRecordsEnd.overflow,
+              nodeRecordsOffset >= headerSize,
+              nodeRecordsEnd.partialValue <= data.count else {
             return nil
         }
 
         var nodes: [OuterframeAccessibilityNode] = []
-        nodes.reserveCapacity(Int(rootCount))
+        var parentIndices: [UInt32] = []
+        nodes.reserveCapacity(nodeCount)
+        parentIndices.reserveCapacity(nodeCount)
 
-        for _ in 0..<rootCount {
-            guard let node = decodeNode(from: &cursor) else {
+        for index in 0..<nodeCount {
+            let offset = nodeRecordsOffset + index * nodeRecordSize
+            guard let decoded = decodeNodeRecord(from: data,
+                                                 offset: offset,
+                                                 variableDataOffset: nodeRecordsEnd.partialValue) else {
                 return nil
             }
-            nodes.append(node)
-        }
-
-        return OuterframeAccessibilitySnapshot(rootNodes: nodes)
-    }
-
-    private func encode(node: OuterframeAccessibilityNode, into data: inout Data) {
-        data.appendUInt32(node.identifier)
-        data.appendUInt8(node.role.rawValue)
-        data.appendFloat32(Float32(node.frame.origin.x))
-        data.appendFloat32(Float32(node.frame.origin.y))
-        data.appendFloat32(Float32(node.frame.size.width))
-        data.appendFloat32(Float32(node.frame.size.height))
-        data.appendOptionalString(node.label)
-        data.appendOptionalString(node.value)
-        data.appendOptionalString(node.hint)
-        data.appendOptionalInt32(node.rowCount)
-        data.appendOptionalInt32(node.columnCount)
-        data.appendUInt8(node.isEnabled ? 1 : 0)
-
-        let clampedChildren = UInt16(max(0, min(node.children.count, Int(UInt16.max))))
-        data.appendUInt16(clampedChildren)
-        for child in node.children.prefix(Int(clampedChildren)) {
-            encode(node: child, into: &data)
-        }
-    }
-
-    private static func decodeNode(from cursor: inout AccessibilityDataCursor) -> OuterframeAccessibilityNode? {
-        guard let identifier = cursor.readUInt32(),
-              let roleRaw = cursor.readUInt8(),
-              let role = OuterframeAccessibilityRole(rawValue: roleRaw),
-              let originX = cursor.readFloat32(),
-              let originY = cursor.readFloat32(),
-              let width = cursor.readFloat32(),
-              let height = cursor.readFloat32(),
-              let label = cursor.readOptionalString(),
-              let value = cursor.readOptionalString(),
-              let hint = cursor.readOptionalString(),
-              let rowCount = cursor.readOptionalInt32(),
-              let columnCount = cursor.readOptionalInt32(),
-              let isEnabledRaw = cursor.readUInt8(),
-              let childCount = cursor.readUInt16() else {
-            return nil
-        }
-
-        let isEnabled = isEnabledRaw != 0
-
-        var children: [OuterframeAccessibilityNode] = []
-        children.reserveCapacity(Int(childCount))
-
-        for _ in 0..<childCount {
-            guard let child = decodeNode(from: &cursor) else {
+            if decoded.parentIndex != UInt32.max && decoded.parentIndex >= UInt32(index) {
                 return nil
             }
-            children.append(child)
+            nodes.append(decoded.node)
+            parentIndices.append(decoded.parentIndex)
         }
 
-        let frame = CGRect(x: CGFloat(originX),
-                           y: CGFloat(originY),
-                           width: CGFloat(width),
-                           height: CGFloat(height))
+        var childIndices = Array(repeating: [Int](), count: nodeCount)
+        var rootIndices: [Int] = []
+        for (index, parentIndex) in parentIndices.enumerated() {
+            if parentIndex == UInt32.max {
+                rootIndices.append(index)
+            } else {
+                childIndices[Int(parentIndex)].append(index)
+            }
+        }
 
-        return OuterframeAccessibilityNode(identifier: identifier,
-                                       role: role,
-                                       frame: frame,
-                                       label: label,
-                                       value: value,
-                                       hint: hint,
-                                       children: children,
-                                       rowCount: rowCount,
-                                       columnCount: columnCount,
-                                       isEnabled: isEnabled)
+        if nodeCount > 0 {
+            for index in stride(from: nodeCount - 1, through: 0, by: -1) {
+                nodes[index].children = childIndices[index].map { nodes[$0] }
+            }
+        }
+
+        return OuterframeAccessibilitySnapshot(rootNodes: rootIndices.map { nodes[$0] })
     }
 }
 
 // MARK: - Binary helpers
 
-private struct AccessibilityDataCursor {
-    private let data: Data
-    private var offset: Int = 0
+private struct FlattenedAccessibilityNode {
+    let node: OuterframeAccessibilityNode
+    let parentIndex: UInt32
+}
 
-    init(data: Data) {
-        self.data = data
+private extension OuterframeAccessibilitySnapshot {
+    static let formatVersion: UInt32 = 1
+    static let headerSize = 24
+    static let nodeRecordSize = 98
+    static let minimumNodeRecordSize: UInt32 = 98
+    static let maximumNodeCount = 100_000
+
+    static let stringLabelFlag: UInt8 = 1 << 0
+    static let stringValueFlag: UInt8 = 1 << 1
+    static let stringHintFlag: UInt8 = 1 << 2
+    static let rowCountFlag: UInt8 = 1 << 3
+    static let columnCountFlag: UInt8 = 1 << 4
+    static let enabledFlag: UInt8 = 1 << 5
+    static let knownFlags = stringLabelFlag | stringValueFlag | stringHintFlag | rowCountFlag | columnCountFlag | enabledFlag
+
+    struct DecodedNodeRecord {
+        let node: OuterframeAccessibilityNode
+        let parentIndex: UInt32
     }
 
-    mutating func readUInt8() -> UInt8? {
-        guard offset < data.count else { return nil }
-        let value = data[offset]
-        offset += 1
-        return value
-    }
-
-    mutating func readUInt16() -> UInt16? {
-        guard offset + 2 <= data.count else { return nil }
-        let byte0 = UInt16(data[offset])
-        let byte1 = UInt16(data[offset + 1])
-        offset += 2
-        return byte0 | (byte1 << 8)
-    }
-
-    mutating func readUInt32() -> UInt32? {
-        guard offset + 4 <= data.count else { return nil }
-        let b0 = UInt32(data[offset])
-        let b1 = UInt32(data[offset + 1])
-        let b2 = UInt32(data[offset + 2])
-        let b3 = UInt32(data[offset + 3])
-        offset += 4
-        return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
-    }
-
-    mutating func readFloat32() -> Float32? {
-        guard let bits = readUInt32() else { return nil }
-        return Float32(bitPattern: bits)
-    }
-
-    mutating func readOptionalString() -> Optional<String>? {
-        guard let hasValue = readUInt8() else { return nil }
-        if hasValue == 0 {
-            return .some(nil)
+    func flattenedNodes() -> [FlattenedAccessibilityNode] {
+        var result: [FlattenedAccessibilityNode] = []
+        var stack: [(node: OuterframeAccessibilityNode, parentIndex: UInt32)] = rootNodes.reversed().map {
+            (node: $0, parentIndex: UInt32.max)
         }
-        guard let length = readUInt32() else { return nil }
-        let intLength = Int(length)
-        guard intLength >= 0, offset + intLength <= data.count else { return nil }
-        let range = offset..<(offset + intLength)
-        offset += intLength
-        let slice = data[range]
-        return String(data: slice, encoding: .utf8)
+
+        while let (node, parentIndex) = stack.popLast() {
+            if result.count >= Self.maximumNodeCount { break }
+            let currentIndex = UInt32(result.count)
+            result.append(FlattenedAccessibilityNode(node: node, parentIndex: parentIndex))
+            for child in node.children.reversed() {
+                stack.append((node: child, parentIndex: currentIndex))
+            }
+        }
+
+        return result
     }
 
-    mutating func readOptionalInt32() -> Optional<Int>? {
-        guard let hasValue = readUInt8() else { return nil }
-        if hasValue == 0 {
-            return .some(nil)
+    func encode(flattenedNode: FlattenedAccessibilityNode,
+                variableDataOffset: Int,
+                stringData: inout Data,
+                nodeRecords: inout Data) {
+        var flags: UInt8 = flattenedNode.node.isEnabled ? Self.enabledFlag : 0
+        let labelReference = appendStringReference(flattenedNode.node.label,
+                                                   variableDataOffset: variableDataOffset,
+                                                   stringData: &stringData)
+        let valueReference = appendStringReference(flattenedNode.node.value,
+                                                   variableDataOffset: variableDataOffset,
+                                                   stringData: &stringData)
+        let hintReference = appendStringReference(flattenedNode.node.hint,
+                                                  variableDataOffset: variableDataOffset,
+                                                  stringData: &stringData)
+        if labelReference != nil { flags |= Self.stringLabelFlag }
+        if valueReference != nil { flags |= Self.stringValueFlag }
+        if hintReference != nil { flags |= Self.stringHintFlag }
+        if flattenedNode.node.rowCount != nil { flags |= Self.rowCountFlag }
+        if flattenedNode.node.columnCount != nil { flags |= Self.columnCountFlag }
+
+        nodeRecords.appendUInt32(flattenedNode.node.identifier)
+        nodeRecords.appendUInt32(flattenedNode.parentIndex)
+        nodeRecords.appendFloat64(flattenedNode.node.frame.origin.x)
+        nodeRecords.appendFloat64(flattenedNode.node.frame.origin.y)
+        nodeRecords.appendFloat64(flattenedNode.node.frame.size.width)
+        nodeRecords.appendFloat64(flattenedNode.node.frame.size.height)
+        nodeRecords.appendStringReference(labelReference)
+        nodeRecords.appendStringReference(valueReference)
+        nodeRecords.appendStringReference(hintReference)
+        nodeRecords.appendInt32(Int32(clamping: flattenedNode.node.rowCount ?? 0))
+        nodeRecords.appendInt32(Int32(clamping: flattenedNode.node.columnCount ?? 0))
+        nodeRecords.appendUInt8(flattenedNode.node.role.rawValue)
+        nodeRecords.appendUInt8(flags)
+    }
+
+    func appendStringReference(_ string: String?,
+                               variableDataOffset: Int,
+                               stringData: inout Data) -> (offset: UInt64, length: UInt64)? {
+        guard let string else { return nil }
+        let encoded = Data(string.utf8)
+        let offset = variableDataOffset + stringData.count
+        stringData.append(encoded)
+        return (UInt64(offset), UInt64(encoded.count))
+    }
+
+    static func decodeNodeRecord(from data: Data,
+                                 offset: Int,
+                                 variableDataOffset: Int) -> DecodedNodeRecord? {
+        guard let identifier = data.readUInt32(at: offset),
+              let parentIndex = data.readUInt32(at: offset + 4),
+              let originX = data.readFloat64(at: offset + 8),
+              let originY = data.readFloat64(at: offset + 16),
+              let width = data.readFloat64(at: offset + 24),
+              let height = data.readFloat64(at: offset + 32),
+              let labelOffset = data.readUInt64(at: offset + 40),
+              let labelLength = data.readUInt64(at: offset + 48),
+              let valueOffset = data.readUInt64(at: offset + 56),
+              let valueLength = data.readUInt64(at: offset + 64),
+              let hintOffset = data.readUInt64(at: offset + 72),
+              let hintLength = data.readUInt64(at: offset + 80),
+              let rowCountRaw = data.readInt32(at: offset + 88),
+              let columnCountRaw = data.readInt32(at: offset + 92),
+              let roleRaw = data.readUInt8(at: offset + 96),
+              let flags = data.readUInt8(at: offset + 97),
+              let role = OuterframeAccessibilityRole(rawValue: roleRaw),
+              flags & ~knownFlags == 0 else {
+            return nil
         }
-        guard let value = readUInt32() else { return nil }
-        return .some(Int(Int32(bitPattern: value)))
+
+        if flags & stringLabelFlag == 0 && (labelOffset != 0 || labelLength != 0) { return nil }
+        if flags & stringValueFlag == 0 && (valueOffset != 0 || valueLength != 0) { return nil }
+        if flags & stringHintFlag == 0 && (hintOffset != 0 || hintLength != 0) { return nil }
+        if flags & rowCountFlag == 0 && rowCountRaw != 0 { return nil }
+        if flags & columnCountFlag == 0 && columnCountRaw != 0 { return nil }
+
+        let label = flags & stringLabelFlag == 0 ? nil : readString(from: data,
+                                                                    offset: labelOffset,
+                                                                    length: labelLength,
+                                                                    variableDataOffset: variableDataOffset)
+        let value = flags & stringValueFlag == 0 ? nil : readString(from: data,
+                                                                    offset: valueOffset,
+                                                                    length: valueLength,
+                                                                    variableDataOffset: variableDataOffset)
+        let hint = flags & stringHintFlag == 0 ? nil : readString(from: data,
+                                                                  offset: hintOffset,
+                                                                  length: hintLength,
+                                                                  variableDataOffset: variableDataOffset)
+
+        if flags & stringLabelFlag != 0 && label == nil { return nil }
+        if flags & stringValueFlag != 0 && value == nil { return nil }
+        if flags & stringHintFlag != 0 && hint == nil { return nil }
+
+        let node = OuterframeAccessibilityNode(identifier: identifier,
+                                               role: role,
+                                               frame: CGRect(x: originX, y: originY, width: width, height: height),
+                                               label: label,
+                                               value: value,
+                                               hint: hint,
+                                               rowCount: flags & rowCountFlag == 0 ? nil : Int(rowCountRaw),
+                                               columnCount: flags & columnCountFlag == 0 ? nil : Int(columnCountRaw),
+                                               isEnabled: flags & enabledFlag != 0)
+        return DecodedNodeRecord(node: node, parentIndex: parentIndex)
+    }
+
+	    static func readString(from data: Data,
+	                           offset: UInt64,
+	                           length: UInt64,
+	                           variableDataOffset: Int) -> String? {
+	        guard let start = Int(exactly: offset),
+	              let byteCount = Int(exactly: length) else {
+	            return nil
+	        }
+	        guard start >= variableDataOffset,
+	              start <= data.count,
+              byteCount <= data.count - start else {
+            return nil
+        }
+        return String(data: data[start..<(start + byteCount)], encoding: .utf8)
     }
 }
 
@@ -259,40 +347,63 @@ private extension Data {
         append(value)
     }
 
-    mutating func appendUInt16(_ value: UInt16) {
-        var le = value.littleEndian
-        Swift.withUnsafeBytes(of: &le) { append(contentsOf: $0) }
-    }
-
     mutating func appendUInt32(_ value: UInt32) {
         var le = value.littleEndian
         Swift.withUnsafeBytes(of: &le) { append(contentsOf: $0) }
     }
 
-    mutating func appendFloat32(_ value: Float32) {
-        appendUInt32(value.bitPattern)
+    mutating func appendUInt64(_ value: UInt64) {
+        var le = value.littleEndian
+        Swift.withUnsafeBytes(of: &le) { append(contentsOf: $0) }
     }
 
-    mutating func appendOptionalString(_ string: String?) {
-        guard let string else {
-            appendUInt8(0)
-            return
-        }
-        appendUInt8(1)
-        if let data = string.data(using: .utf8) {
-            appendUInt32(UInt32(data.count))
-            append(data)
-        } else {
-            appendUInt32(0)
-        }
+    mutating func appendFloat64(_ value: CGFloat) {
+        appendUInt64(Double(value).bitPattern)
     }
 
-    mutating func appendOptionalInt32(_ value: Int?) {
-        guard let value else {
-            appendUInt8(0)
-            return
-        }
-        appendUInt8(1)
-        appendUInt32(UInt32(bitPattern: Int32(clamping: value)))
+    mutating func appendInt32(_ value: Int32) {
+        appendUInt32(UInt32(bitPattern: value))
+    }
+
+    mutating func appendStringReference(_ reference: (offset: UInt64, length: UInt64)?) {
+        appendUInt64(reference?.offset ?? 0)
+        appendUInt64(reference?.length ?? 0)
+    }
+
+    func readUInt8(at offset: Int) -> UInt8? {
+        guard offset >= 0, offset < count else { return nil }
+        return self[offset]
+    }
+
+    func readUInt32(at offset: Int) -> UInt32? {
+        guard offset >= 0, offset + 4 <= count else { return nil }
+        let b0 = UInt32(self[offset])
+        let b1 = UInt32(self[offset + 1])
+        let b2 = UInt32(self[offset + 2])
+        let b3 = UInt32(self[offset + 3])
+        return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    }
+
+    func readUInt64(at offset: Int) -> UInt64? {
+        guard offset >= 0, offset + 8 <= count else { return nil }
+        let b0 = UInt64(self[offset])
+        let b1 = UInt64(self[offset + 1])
+        let b2 = UInt64(self[offset + 2])
+        let b3 = UInt64(self[offset + 3])
+        let b4 = UInt64(self[offset + 4])
+        let b5 = UInt64(self[offset + 5])
+        let b6 = UInt64(self[offset + 6])
+        let b7 = UInt64(self[offset + 7])
+        return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56)
+    }
+
+    func readInt32(at offset: Int) -> Int32? {
+        guard let value = readUInt32(at: offset) else { return nil }
+        return Int32(bitPattern: value)
+    }
+
+    func readFloat64(at offset: Int) -> CGFloat? {
+        guard let bits = readUInt64(at: offset) else { return nil }
+        return CGFloat(Double(bitPattern: bits))
     }
 }

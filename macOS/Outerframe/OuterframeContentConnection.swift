@@ -138,7 +138,7 @@ final class OuterframeContentConnection: NSObject {
     /// Socket for infrastructure messages (loadPlugin, pluginLoaded, etc.)
     private let infrastructureSocket = OuterframeContentSocket()
     /// Socket for plugin messages (mouse, keyboard, display link, etc.)
-    private let pluginSocket = OuterframeContentSocket()
+    let pluginSocket = OuterframeContentSocket()
     private var stdoutHandle: FileHandle?
     private var stderrHandle: FileHandle?
     private var outerframeContentPID: pid_t?
@@ -519,8 +519,7 @@ final class OuterframeContentConnection: NSObject {
 
         let initializeContentArguments = InitializeContentArguments(
             data: data,
-            contentWidth: width,
-            contentHeight: height,
+            contentSize: CGSize(width: width, height: height),
             appearance: NSApp.effectiveAppearance,
             proxy: proxy,
             url: outerURLString,
@@ -578,103 +577,8 @@ final class OuterframeContentConnection: NSObject {
         }
     }
 
-    func resizeContent(width: CGFloat, height: CGFloat) {
-        let message = BrowserToContentMessage.resizeContent(width: width, height: height)
-        let pluginSocket = self.pluginSocket
-        Task {
-            do {
-                try await pluginSocket.send(message.encode())
-            } catch {
-                print("Browser: Failed to send resizeContent message to OuterframeContent: \(error)")
-            }
-        }
-    }
-
-    enum MouseEventType {
-        case down
-        case dragged
-        case up
-        case moved
-        case rightDown
-        case rightUp
-    }
-
-    func sendMouseEvent(type: MouseEventType, point: CGPoint, modifierFlags: NSEvent.ModifierFlags, clickCount: Int = 0) {
-        let x = Float32(point.x)
-        let y = Float32(point.y)
-        let flags = UInt64(modifierFlags.rawValue)
-        let clicks = UInt32(clickCount)
-
-        let message: BrowserToContentMessage
-        switch type {
-        case .down:
-            message = .mouseDown(x: x, y: y, modifierFlags: flags, clickCount: clicks)
-        case .dragged:
-            message = .mouseDragged(x: x, y: y, modifierFlags: flags)
-        case .up:
-            message = .mouseUp(x: x, y: y, modifierFlags: flags)
-        case .moved:
-            message = .mouseMoved(x: x, y: y, modifierFlags: flags)
-        case .rightDown:
-            message = .rightMouseDown(x: x, y: y, modifierFlags: flags, clickCount: clicks)
-        case .rightUp:
-            message = .rightMouseUp(x: x, y: y, modifierFlags: flags)
-        }
-
-        let pluginSocket = self.pluginSocket
-        Task {
-            do {
-                try await pluginSocket.send(message.encode())
-            } catch {
-                print("Browser: Failed to send mouse event to OuterframeContent: \(error)")
-            }
-        }
-    }
-
-    func sendScrollWheelEvent(point: CGPoint,
-                              delta: CGPoint,
-                              modifierFlags: NSEvent.ModifierFlags,
-                              phase: NSEvent.Phase,
-                              momentumPhase: NSEvent.Phase,
-                              hasPreciseScrollingDeltas: Bool) {
-        let x = Float32(point.x)
-        let y = Float32(point.y)
-        let deltaX = Float32(delta.x)
-        let deltaY = Float32(delta.y)
-        let flags = UInt64(modifierFlags.rawValue)
-        let phaseRaw = UInt32(truncatingIfNeeded: phase.rawValue)
-        let momentumPhaseRaw = UInt32(truncatingIfNeeded: momentumPhase.rawValue)
-
-        let message = BrowserToContentMessage.scrollWheelEvent(x: x,
-                                                                    y: y,
-                                                                    deltaX: deltaX,
-                                                                    deltaY: deltaY,
-                                                                    modifierFlags: flags,
-                                                                    phase: phaseRaw,
-                                                                    momentumPhase: momentumPhaseRaw,
-                                                                    hasPreciseScrollingDeltas: hasPreciseScrollingDeltas)
-
-        let pluginSocket = self.pluginSocket
-        Task {
-            do {
-                try await pluginSocket.send(message.encode())
-            } catch {
-                print("Browser: Failed to send scroll wheel event to OuterframeContent: \(error)")
-            }
-        }
-    }
-
-    func sendQuickLookEvent(point: CGPoint) {
-        let message = BrowserToContentMessage.quickLook(x: Float32(point.x),
-                                                             y: Float32(point.y))
-        let pluginSocket = self.pluginSocket
-        Task {
-            do {
-                try await pluginSocket.send(message.encode())
-            } catch {
-                print("Browser: Failed to send quickLook message to OuterframeContent: \(error)")
-            }
-        }
+    func resizeContent(size: CGSize) {
+        sendToOuterframeContent(.resizeContent(size: size))
     }
 
     func sendMagnification(surfaceID: Int,
@@ -682,21 +586,10 @@ final class OuterframeContentConnection: NSObject {
                            location: CGPoint,
                            scrollOffset: CGPoint) {
         precondition(surfaceID >= 0 && surfaceID <= Int(UInt32.max), "Surface identifier out of range")
-        let message = BrowserToContentMessage.magnification(surfaceID: UInt32(surfaceID),
-                                                                 magnification: Float32(delta),
-                                                                 x: Float32(location.x),
-                                                                 y: Float32(location.y),
-                                                                 scrollX: Float32(scrollOffset.x),
-                                                                 scrollY: Float32(scrollOffset.y))
-
-        let pluginSocket = self.pluginSocket
-        Task {
-            do {
-                try await pluginSocket.send(message.encode())
-            } catch {
-                print("Browser: Failed to send magnification message: \(error)")
-            }
-        }
+        sendToOuterframeContent(.magnification(surfaceID: UInt32(surfaceID),
+                                               magnification: delta,
+                                               location: location,
+                                               scrollOffset: scrollOffset))
     }
 
     func sendMagnificationEnded(surfaceID: Int,
@@ -704,33 +597,14 @@ final class OuterframeContentConnection: NSObject {
                                 location: CGPoint,
                                 scrollOffset: CGPoint) {
         precondition(surfaceID >= 0 && surfaceID <= Int(UInt32.max), "Surface identifier out of range")
-        let message = BrowserToContentMessage.magnificationEnded(surfaceID: UInt32(surfaceID),
-                                                                      magnification: Float32(delta),
-                                                                      x: Float32(location.x),
-                                                                      y: Float32(location.y),
-                                                                      scrollX: Float32(scrollOffset.x),
-                                                                      scrollY: Float32(scrollOffset.y))
-
-        let pluginSocket = self.pluginSocket
-        Task {
-            do {
-                try await pluginSocket.send(message.encode())
-            } catch {
-                print("Browser: Failed to send magnificationEnded message: \(error)")
-            }
-        }
+        sendToOuterframeContent(.magnificationEnded(surfaceID: UInt32(surfaceID),
+                                                    magnification: delta,
+                                                    location: location,
+                                                    scrollOffset: scrollOffset))
     }
 
     func sendDisplayLinkFrame(frameNumber: UInt64, targetTimestamp: CFTimeInterval) {
-        let pluginSocket = self.pluginSocket
-        Task {
-            do {
-                let message = BrowserToContentMessage.displayLinkFired(frameNumber: frameNumber, targetTimestamp: targetTimestamp)
-                try await pluginSocket.send(message.encode())
-            } catch {
-                print("Browser: Failed to send display link frame message: \(error)")
-            }
-        }
+        sendToOuterframeContent(.displayLinkFired(frameNumber: frameNumber, targetTimestamp: targetTimestamp))
     }
 
     // MARK: - System Colors
@@ -753,51 +627,19 @@ final class OuterframeContentConnection: NSObject {
 
         lastSystemAppearancePayload = data
 
-        let message = BrowserToContentMessage.systemAppearanceUpdate(appearance: appearance)
-        let pluginSocket = self.pluginSocket
-        Task {
-            do {
-                try await pluginSocket.send(message.encode())
-            } catch {
-                print("Browser: Failed to send systemAppearanceUpdate message: \(error)")
-            }
-        }
+        sendToOuterframeContent(.systemAppearanceUpdate(appearance: appearance))
     }
 
     func sendWindowActiveState(isActive: Bool) {
-        let message = BrowserToContentMessage.windowActiveUpdate(isActive: isActive)
-        let pluginSocket = self.pluginSocket
-        Task {
-            do {
-                try await pluginSocket.send(message.encode())
-            } catch {
-                print("Browser: Failed to send windowActiveUpdate message: \(error)")
-            }
-        }
+        sendToOuterframeContent(.windowActiveUpdate(isActive: isActive))
     }
 
     func sendViewFocusChanged(isFocused: Bool) {
-        let message = BrowserToContentMessage.viewFocusChanged(isFocused: isFocused)
-        let pluginSocket = self.pluginSocket
-        Task {
-            do {
-                try await pluginSocket.send(message.encode())
-            } catch {
-                print("Browser: Failed to send viewFocusChanged message: \(error)")
-            }
-        }
+        sendToOuterframeContent(.viewFocusChanged(isFocused: isFocused))
     }
 
     func setDebuggerAttachmentMonitoring(isEnabled: Bool) {
-        let message = BrowserToContentInfraMessage.setDebuggerAttachmentMonitoring(isEnabled: isEnabled)
-        let infrastructureSocket = self.infrastructureSocket
-        Task {
-            do {
-                try await infrastructureSocket.send(message.encode())
-            } catch {
-                print("Browser: Failed to send setDebuggerAttachmentMonitoring message: \(error)")
-            }
-        }
+        sendToInfrastructure(.setDebuggerAttachmentMonitoring(isEnabled: isEnabled))
     }
 
     // MARK: - Text Input Support
@@ -806,18 +648,10 @@ final class OuterframeContentConnection: NSObject {
         let hasRange = replacementRange.location != NSNotFound
         let locationValue = hasRange ? UInt64(clamping: replacementRange.location) : 0
         let lengthValue = hasRange ? UInt64(clamping: replacementRange.length) : 0
-        let message = BrowserToContentMessage.textInput(text: text,
-                                                             hasReplacementRange: hasRange,
-                                                             replacementLocation: locationValue,
-                                                             replacementLength: lengthValue)
-        let pluginSocket = self.pluginSocket
-        Task {
-            do {
-                try await pluginSocket.send(message.encode())
-            } catch {
-                print("Browser: Failed to send textInput message: \(error)")
-            }
-        }
+        sendToOuterframeContent(.textInput(text: text,
+                                           hasReplacementRange: hasRange,
+                                           replacementLocation: locationValue,
+                                           replacementLength: lengthValue))
     }
 
     func sendSetMarkedText(text: String, selectedRange: NSRange, replacementRange: NSRange) {
@@ -826,57 +660,24 @@ final class OuterframeContentConnection: NSObject {
         let selectedLength = UInt64(clamping: selectedRange.length)
         let replacementLocation = hasRange ? UInt64(clamping: replacementRange.location) : 0
         let replacementLength = hasRange ? UInt64(clamping: replacementRange.length) : 0
-        let message = BrowserToContentMessage.setMarkedText(text: text,
-                                                                 selectedLocation: selectedLocation,
-                                                                 selectedLength: selectedLength,
-                                                                 hasReplacementRange: hasRange,
-                                                                 replacementLocation: replacementLocation,
-                                                                 replacementLength: replacementLength)
-        let pluginSocket = self.pluginSocket
-        Task {
-            do {
-                try await pluginSocket.send(message.encode())
-            } catch {
-                print("Browser: Failed to send setMarkedText message: \(error)")
-            }
-        }
+        sendToOuterframeContent(.setMarkedText(text: text,
+                                               selectedLocation: selectedLocation,
+                                               selectedLength: selectedLength,
+                                               hasReplacementRange: hasRange,
+                                               replacementLocation: replacementLocation,
+                                               replacementLength: replacementLength))
     }
 
     func sendUnmarkText() {
-        let message = BrowserToContentMessage.unmarkText
-        let pluginSocket = self.pluginSocket
-        Task {
-            do {
-                try await pluginSocket.send(message.encode())
-            } catch {
-                print("Browser: Failed to send unmarkText message: \(error)")
-            }
-        }
+        sendToOuterframeContent(.unmarkText)
     }
 
     func sendTextInputFocus(fieldID: UUID, hasFocus: Bool) {
-        let message = BrowserToContentMessage.textInputFocus(fieldID: fieldID,
-                                                                  hasFocus: hasFocus)
-        let pluginSocket = self.pluginSocket
-        Task {
-            do {
-                try await pluginSocket.send(message.encode())
-            } catch {
-                print("Browser: Failed to send textInputFocus message: \(error)")
-            }
-        }
+        sendToOuterframeContent(.textInputFocus(fieldID: fieldID, hasFocus: hasFocus))
     }
 
     func sendTextCommand(command: String) {
-        let message = BrowserToContentMessage.textCommand(command: command)
-        let pluginSocket = self.pluginSocket
-        Task {
-            do {
-                try await pluginSocket.send(message.encode())
-            } catch {
-                print("Browser: Failed to send textCommand message: \(error)")
-            }
-        }
+        sendToOuterframeContent(.textCommand(command: command))
     }
 
     func requestPasteboardItemsForCopy(completion: @escaping ([OuterframeContentPasteboardItem]?) -> Void) {
@@ -927,151 +728,107 @@ final class OuterframeContentConnection: NSObject {
     }
 
     func sendPasteboardItemsForPaste(_ items: [OuterframeContentPasteboardItem]) {
-        let message = BrowserToContentMessage.pasteboardContentDelivered(items: items)
-        let pluginSocket = self.pluginSocket
-        Task {
-            do {
-                try await pluginSocket.send(message.encode())
-            } catch {
-                print("Browser: Failed to send pasteboardContentDelivered message: \(error)")
-            }
-        }
+        sendToOuterframeContent(.pasteboardContentDelivered(items: items))
     }
 
     func sendSetCursorPosition(fieldID: UUID, position: UInt64, modifySelection: Bool) {
-        let message = BrowserToContentMessage.setCursorPosition(fieldID: fieldID,
-                                                                     position: position,
-                                                                     modifySelection: modifySelection)
-        let pluginSocket = self.pluginSocket
-        Task {
-            do {
-                try await pluginSocket.send(message.encode())
-            } catch {
-                print("Browser: Failed to send setCursorPosition message: \(error)")
-            }
-        }
+        sendToOuterframeContent(.setCursorPosition(fieldID: fieldID,
+                                                   position: position,
+                                                   modifySelection: modifySelection))
     }
 
-    func sendKeyDown(keyCode: UInt16, characters: String, charactersIgnoringModifiers: String, modifierFlags: NSEvent.ModifierFlags, isARepeat: Bool) {
-        let message = BrowserToContentMessage.keyDown(keyCode: keyCode,
-                                                           characters: characters,
-                                                           charactersIgnoringModifiers: charactersIgnoringModifiers,
-                                                           modifierFlags: UInt64(modifierFlags.rawValue),
-                                                           isARepeat: isARepeat)
-        let pluginSocket = self.pluginSocket
-        Task {
-            do {
-                try await pluginSocket.send(message.encode())
-            } catch {
-                print("Browser: Failed to send keyDown message to OuterframeContent: \(error)")
-            }
-        }
-    }
-
-    func sendKeyUp(keyCode: UInt16, characters: String, charactersIgnoringModifiers: String, modifierFlags: NSEvent.ModifierFlags, isARepeat: Bool) {
-        let message = BrowserToContentMessage.keyUp(keyCode: keyCode,
-                                                         characters: characters,
-                                                         charactersIgnoringModifiers: charactersIgnoringModifiers,
-                                                         modifierFlags: UInt64(modifierFlags.rawValue),
-                                                         isARepeat: isARepeat)
-        let pluginSocket = self.pluginSocket
-        Task {
-            do {
-                try await pluginSocket.send(message.encode())
-            } catch {
-                print("Browser: Failed to send keyUp message to OuterframeContent: \(error)")
-            }
-        }
-    }
-
-    private func handleGetImageWithSystemSymbolName(requestID: UUID, symbolName: String, pointSize: Float, weight: String, scale: Float, tintRed: Float, tintGreen: Float, tintBlue: Float, tintAlpha: Float) {
-        // Create and configure the SF Symbol image
+    private func handleGetImageWithSystemSymbolName(requestID: UUID, symbolName: String, pointSize: CGFloat, weight: Double, scale: CGFloat) {
         guard let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil) else {
-            self.sendImageWithSystemSymbolNameResponse(requestID: requestID, imageData: nil, width: 0, height: 0, success: false, errorMessage: "Symbol '\(symbolName)' not found")
+            self.sendImageWithSystemSymbolNameResponse(requestID: requestID, alphaMaskData: nil, width: 0, height: 0, bytesPerRow: 0, success: false, errorMessage: "Symbol '\(symbolName)' not found")
             return
         }
 
-        // Configure the symbol
-        var symbolWeight: NSFont.Weight = .regular
-        switch weight.lowercased() {
-        case "ultralight": symbolWeight = .ultraLight
-        case "thin": symbolWeight = .thin
-        case "light": symbolWeight = .light
-        case "regular": symbolWeight = .regular
-        case "medium": symbolWeight = .medium
-        case "semibold": symbolWeight = .semibold
-        case "bold": symbolWeight = .bold
-        case "heavy": symbolWeight = .heavy
-        case "black": symbolWeight = .black
-        default: symbolWeight = .regular
-        }
-
-        let config = NSImage.SymbolConfiguration(pointSize: CGFloat(pointSize), weight: symbolWeight)
+        let symbolWeight = NSFont.Weight(CGFloat(weight))
+        let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: symbolWeight)
         guard let configuredImage = image.withSymbolConfiguration(config) else {
-            self.sendImageWithSystemSymbolNameResponse(requestID: requestID, imageData: nil, width: 0, height: 0, success: false, errorMessage: "Failed to configure symbol")
+            self.sendImageWithSystemSymbolNameResponse(requestID: requestID, alphaMaskData: nil, width: 0, height: 0, bytesPerRow: 0, success: false, errorMessage: "Failed to configure symbol")
             return
         }
 
-        // Create a bitmap representation with the tint color
-        let imageSize = CGSize(width: configuredImage.size.width * CGFloat(scale),
-                               height: configuredImage.size.height * CGFloat(scale))
+        let pixelWidth = max(Int(ceil(configuredImage.size.width * scale)), 1)
+        let pixelHeight = max(Int(ceil(configuredImage.size.height * scale)), 1)
+        let rgbaBytesPerRow = pixelWidth * 4
+        var rgbaData = Data(count: rgbaBytesPerRow * pixelHeight)
 
-        guard let bitmapRep = NSBitmapImageRep(
-            bitmapDataPlanes: nil,
-            pixelsWide: Int(imageSize.width),
-            pixelsHigh: Int(imageSize.height),
-            bitsPerSample: 8,
-            samplesPerPixel: 4,
-            hasAlpha: true,
-            isPlanar: false,
-            colorSpaceName: .deviceRGB,
-            bytesPerRow: 0,
-            bitsPerPixel: 0
-        ) else {
-            self.sendImageWithSystemSymbolNameResponse(requestID: requestID, imageData: nil, width: 0, height: 0, success: false, errorMessage: "Failed to create bitmap")
+        let rendered = rgbaData.withUnsafeMutableBytes { bytes -> Bool in
+            guard let baseAddress = bytes.baseAddress,
+                  let context = CGContext(data: baseAddress,
+                                          width: pixelWidth,
+                                          height: pixelHeight,
+                                          bitsPerComponent: 8,
+                                          bytesPerRow: rgbaBytesPerRow,
+                                          space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+                return false
+            }
+
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+            NSColor.clear.set()
+            NSRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight).fill()
+            configuredImage.draw(in: NSRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight), from: .zero, operation: .sourceOver, fraction: 1.0)
+            NSGraphicsContext.restoreGraphicsState()
+            return true
+        }
+
+        guard rendered else {
+            self.sendImageWithSystemSymbolNameResponse(requestID: requestID, alphaMaskData: nil, width: 0, height: 0, bytesPerRow: 0, success: false, errorMessage: "Failed to create bitmap")
             return
         }
 
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmapRep)
-
-        // Clear background
-        NSColor.clear.set()
-        NSRect(origin: .zero, size: imageSize).fill()
-
-        // Draw the symbol with tint
-        let tintColor = NSColor(red: CGFloat(tintRed), green: CGFloat(tintGreen), blue: CGFloat(tintBlue), alpha: CGFloat(tintAlpha))
-        configuredImage.draw(in: NSRect(origin: .zero, size: imageSize), from: .zero, operation: .sourceOver, fraction: 1.0)
-
-        // Apply tint using source-in compositing
-        tintColor.set()
-        NSRect(origin: .zero, size: imageSize).fill(using: .sourceIn)
-
-        NSGraphicsContext.restoreGraphicsState()
-
-        // Convert to PNG data
-        guard let pngData = bitmapRep.representation(using: .png, properties: [:]) else {
-            self.sendImageWithSystemSymbolNameResponse(requestID: requestID, imageData: nil, width: 0, height: 0, success: false, errorMessage: "Failed to create PNG data")
-            return
+        var alphaMaskData = Data(count: pixelWidth * pixelHeight)
+        rgbaData.withUnsafeBytes { rgbaBytes in
+            alphaMaskData.withUnsafeMutableBytes { alphaBytes in
+                guard let rgbaBaseAddress = rgbaBytes.baseAddress,
+                      let alphaBaseAddress = alphaBytes.baseAddress else {
+                    return
+                }
+                let rgba = rgbaBaseAddress.assumingMemoryBound(to: UInt8.self)
+                let alpha = alphaBaseAddress.assumingMemoryBound(to: UInt8.self)
+                for y in 0..<pixelHeight {
+                    for x in 0..<pixelWidth {
+                        alpha[y * pixelWidth + x] = rgba[y * rgbaBytesPerRow + x * 4 + 3]
+                    }
+                }
+            }
         }
 
-        // Send response back to plugin
-        self.sendImageWithSystemSymbolNameResponse(requestID: requestID, imageData: pngData, width: UInt32(imageSize.width), height: UInt32(imageSize.height), success: true, errorMessage: nil)
+        self.sendImageWithSystemSymbolNameResponse(requestID: requestID, alphaMaskData: alphaMaskData, width: UInt32(pixelWidth), height: UInt32(pixelHeight), bytesPerRow: UInt32(pixelWidth), success: true, errorMessage: nil)
     }
 
-    private func sendImageWithSystemSymbolNameResponse(requestID: UUID, imageData: Data?, width: UInt32, height: UInt32, success: Bool, errorMessage: String?) {
-        let message = BrowserToContentMessage.imageWithSystemSymbolName(requestID: requestID,
-                                                                             imageData: imageData,
-                                                                             width: width,
-                                                                             height: height,
-                                                                             success: success,
-                                                                             errorMessage: errorMessage)
+    private func sendImageWithSystemSymbolNameResponse(requestID: UUID, alphaMaskData: Data?, width: UInt32, height: UInt32, bytesPerRow: UInt32, success: Bool, errorMessage: String?) {
+        sendToOuterframeContent(.imageWithSystemSymbolName(requestID: requestID,
+                                                           alphaMaskData: alphaMaskData,
+                                                           width: width,
+                                                           height: height,
+                                                           bytesPerRow: bytesPerRow,
+                                                           success: success,
+                                                           errorMessage: errorMessage))
+    }
+
+    func sendToOuterframeContent(_ message: BrowserToContentMessage) {
         let pluginSocket = self.pluginSocket
         Task {
             do {
                 try await pluginSocket.send(message.encode())
             } catch {
-                print("Browser: Failed to send imageWithSystemSymbolName message: \(error)")
+                print("Browser: Failed to send message to OuterframeContent: \(error)")
+            }
+        }
+    }
+
+    private func sendToInfrastructure(_ message: BrowserToContentInfraMessage) {
+        let infrastructureSocket = self.infrastructureSocket
+        Task {
+            do {
+                try await infrastructureSocket.send(message.encode())
+            } catch {
+                print("Browser: Failed to send infrastructure message to OuterframeContent: \(error)")
             }
         }
     }
@@ -1236,7 +993,7 @@ extension OuterframeContentConnection: OuterframeContentSocketDelegate {
 
         case .showContextMenu(let attributedTextData, let locationX, let locationY):
             guard let delegate = delegate else { return }
-            let location = CGPoint(x: CGFloat(locationX), y: CGFloat(locationY))
+            let location = CGPoint(x: locationX, y: locationY)
             guard let attributedText = decodeAttributedString(from: attributedTextData) else {
                 print("Browser: Failed to decode attributed text for context menu")
                 return
@@ -1245,7 +1002,7 @@ extension OuterframeContentConnection: OuterframeContentSocketDelegate {
 
         case .showDefinition(let attributedTextData, let locationX, let locationY):
             guard let delegate = delegate else { return }
-            let location = CGPoint(x: CGFloat(locationX), y: CGFloat(locationY))
+            let location = CGPoint(x: locationX, y: locationY)
             guard let attributedText = decodeAttributedString(from: attributedTextData) else {
                 print("Browser: Failed to decode attributed text for definition")
                 return
@@ -1263,20 +1020,12 @@ extension OuterframeContentConnection: OuterframeContentSocketDelegate {
                                            let symbolName,
                                            let pointSize,
                                            let weight,
-                                           let scale,
-                                           let tintRed,
-                                           let tintGreen,
-                                           let tintBlue,
-                                           let tintAlpha):
+                                           let scale):
             handleGetImageWithSystemSymbolName(requestID: requestID,
-                                  symbolName: symbolName,
-                                  pointSize: pointSize,
-                                  weight: weight,
-                                  scale: scale,
-                                  tintRed: tintRed,
-                                  tintGreen: tintGreen,
-                                  tintBlue: tintBlue,
-                                  tintAlpha: tintAlpha)
+                                               symbolName: symbolName,
+                                               pointSize: pointSize,
+                                               weight: weight,
+                                  scale: scale)
 
         case .textCursorUpdate(let cursors):
             guard let delegate = delegate else { return }
@@ -1300,16 +1049,10 @@ extension OuterframeContentConnection: OuterframeContentSocketDelegate {
         case .accessibilityTreeChanged(let notificationMask):
             delegate?.handleAccessibilityTreeChanged(notificationMask: notificationMask)
 
-        case .openNewWindow(let urlString, let displayString, let preferredWidth, let preferredHeight):
-            let size: CGSize?
-            if let preferredWidth, let preferredHeight {
-                size = CGSize(width: CGFloat(preferredWidth), height: CGFloat(preferredHeight))
-            } else {
-                size = nil
-            }
+        case .openNewWindow(let urlString, let displayString, let preferredSize):
             delegate?.handlePluginOpenNewWindow(urlString: urlString,
                                                 displayString: displayString,
-                                                preferredSize: size)
+                                                preferredSize: preferredSize)
 
         case .setPasteboardCapabilities(let canCopy, let canCut, let pasteboardTypes):
             delegate?.setPasteboardCapabilities(canCopy: canCopy,

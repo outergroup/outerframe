@@ -105,8 +105,8 @@ public struct OuterframeAccessibilitySnapshot: Sendable {
         var data = Data(capacity: Self.headerSize + nodeRecords.count + stringData.count)
         data.appendUInt32(Self.formatVersion)
         data.appendUInt32(UInt32(Self.nodeRecordSize))
-        data.appendUInt64(UInt64(nodeRecordsOffset))
-        data.appendUInt64(UInt64(flattenedNodes.count))
+        data.appendUInt32(UInt32(nodeRecordsOffset))
+        data.appendUInt32(UInt32(nodeRecords.count))
         data.append(nodeRecords)
         data.append(stringData)
         return data
@@ -118,19 +118,21 @@ public struct OuterframeAccessibilitySnapshot: Sendable {
               let version = data.readUInt32(at: 0),
               version == formatVersion,
               let nodeRecordSizeRaw = data.readUInt32(at: 4),
-	              let nodeRecordsOffsetRaw = data.readUInt64(at: 8),
-	              let nodeCountRaw = data.readUInt64(at: 16),
-	              nodeRecordSizeRaw >= minimumNodeRecordSize,
-	              let nodeRecordSize = Int(exactly: nodeRecordSizeRaw),
-	              let nodeRecordsOffset = Int(exactly: nodeRecordsOffsetRaw),
-	              let nodeCount = Int(exactly: nodeCountRaw),
-	              nodeCount <= maximumNodeCount else {
-	            return nil
-	        }
+              let nodeRecordsOffsetRaw = data.readUInt32(at: 8),
+              let nodeRecordsLengthRaw = data.readUInt32(at: 12),
+              nodeRecordSizeRaw >= minimumNodeRecordSize,
+              let nodeRecordSize = Int(exactly: nodeRecordSizeRaw),
+              let nodeRecordsOffset = Int(exactly: nodeRecordsOffsetRaw),
+              let nodeRecordsLength = Int(exactly: nodeRecordsLengthRaw),
+              nodeRecordsLength.isMultiple(of: nodeRecordSize) else {
+            return nil
+        }
+        let nodeCount = nodeRecordsLength / nodeRecordSize
+        guard nodeCount <= maximumNodeCount else {
+            return nil
+        }
 
-	        let nodeRecordsSize = nodeCount.multipliedReportingOverflow(by: nodeRecordSize)
-        guard !nodeRecordsSize.overflow else { return nil }
-        let nodeRecordsEnd = nodeRecordsOffset.addingReportingOverflow(nodeRecordsSize.partialValue)
+        let nodeRecordsEnd = nodeRecordsOffset.addingReportingOverflow(nodeRecordsLength)
         guard !nodeRecordsEnd.overflow,
               nodeRecordsOffset >= headerSize,
               nodeRecordsEnd.partialValue <= data.count else {
@@ -185,9 +187,9 @@ private struct FlattenedAccessibilityNode {
 
 private extension OuterframeAccessibilitySnapshot {
     static let formatVersion: UInt32 = 1
-    static let headerSize = 24
-    static let nodeRecordSize = 98
-    static let minimumNodeRecordSize: UInt32 = 98
+    static let headerSize = 16
+    static let nodeRecordSize = 74
+    static let minimumNodeRecordSize: UInt32 = 74
     static let maximumNodeCount = 100_000
 
     static let stringLabelFlag: UInt8 = 1 << 0
@@ -196,7 +198,6 @@ private extension OuterframeAccessibilitySnapshot {
     static let rowCountFlag: UInt8 = 1 << 3
     static let columnCountFlag: UInt8 = 1 << 4
     static let enabledFlag: UInt8 = 1 << 5
-    static let knownFlags = stringLabelFlag | stringValueFlag | stringHintFlag | rowCountFlag | columnCountFlag | enabledFlag
 
     struct DecodedNodeRecord {
         let node: OuterframeAccessibilityNode
@@ -258,12 +259,16 @@ private extension OuterframeAccessibilitySnapshot {
 
     func appendStringReference(_ string: String?,
                                variableDataOffset: Int,
-                               stringData: inout Data) -> (offset: UInt64, length: UInt64)? {
+                               stringData: inout Data) -> (offset: UInt32, length: UInt32)? {
         guard let string else { return nil }
         let encoded = Data(string.utf8)
         let offset = variableDataOffset + stringData.count
+        guard let offset = UInt32(exactly: offset),
+              let length = UInt32(exactly: encoded.count) else {
+            preconditionFailure("Accessibility snapshot is too large to serialize")
+        }
         stringData.append(encoded)
-        return (UInt64(offset), UInt64(encoded.count))
+        return (offset, length)
     }
 
     static func decodeNodeRecord(from data: Data,
@@ -275,18 +280,17 @@ private extension OuterframeAccessibilitySnapshot {
               let originY = data.readFloat64(at: offset + 16),
               let width = data.readFloat64(at: offset + 24),
               let height = data.readFloat64(at: offset + 32),
-              let labelOffset = data.readUInt64(at: offset + 40),
-              let labelLength = data.readUInt64(at: offset + 48),
-              let valueOffset = data.readUInt64(at: offset + 56),
-              let valueLength = data.readUInt64(at: offset + 64),
-              let hintOffset = data.readUInt64(at: offset + 72),
-              let hintLength = data.readUInt64(at: offset + 80),
-              let rowCountRaw = data.readInt32(at: offset + 88),
-              let columnCountRaw = data.readInt32(at: offset + 92),
-              let roleRaw = data.readUInt8(at: offset + 96),
-              let flags = data.readUInt8(at: offset + 97),
-              let role = OuterframeAccessibilityRole(rawValue: roleRaw),
-              flags & ~knownFlags == 0 else {
+              let labelOffset = data.readUInt32(at: offset + 40),
+              let labelLength = data.readUInt32(at: offset + 44),
+              let valueOffset = data.readUInt32(at: offset + 48),
+              let valueLength = data.readUInt32(at: offset + 52),
+              let hintOffset = data.readUInt32(at: offset + 56),
+              let hintLength = data.readUInt32(at: offset + 60),
+              let rowCountRaw = data.readInt32(at: offset + 64),
+              let columnCountRaw = data.readInt32(at: offset + 68),
+              let roleRaw = data.readUInt8(at: offset + 72),
+              let flags = data.readUInt8(at: offset + 73),
+              let role = OuterframeAccessibilityRole(rawValue: roleRaw) else {
             return nil
         }
 
@@ -325,16 +329,14 @@ private extension OuterframeAccessibilitySnapshot {
         return DecodedNodeRecord(node: node, parentIndex: parentIndex)
     }
 
-	    static func readString(from data: Data,
-	                           offset: UInt64,
-	                           length: UInt64,
-	                           variableDataOffset: Int) -> String? {
-	        guard let start = Int(exactly: offset),
-	              let byteCount = Int(exactly: length) else {
-	            return nil
-	        }
-	        guard start >= variableDataOffset,
-	              start <= data.count,
+    static func readString(from data: Data,
+                           offset: UInt32,
+                           length: UInt32,
+                           variableDataOffset: Int) -> String? {
+        let start = Int(offset)
+        let byteCount = Int(length)
+        guard start >= variableDataOffset,
+              start <= data.count,
               byteCount <= data.count - start else {
             return nil
         }
@@ -365,9 +367,9 @@ private extension Data {
         appendUInt32(UInt32(bitPattern: value))
     }
 
-    mutating func appendStringReference(_ reference: (offset: UInt64, length: UInt64)?) {
-        appendUInt64(reference?.offset ?? 0)
-        appendUInt64(reference?.length ?? 0)
+    mutating func appendStringReference(_ reference: (offset: UInt32, length: UInt32)?) {
+        appendUInt32(reference?.offset ?? 0)
+        appendUInt32(reference?.length ?? 0)
     }
 
     func readUInt8(at offset: Int) -> UInt8? {

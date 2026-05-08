@@ -81,13 +81,6 @@ enum BrowserToContentMessage {
     case magnification(surfaceID: UInt32, magnification: CGFloat, location: CGPoint, scrollOffset: CGPoint)
     case magnificationEnded(surfaceID: UInt32, magnification: CGFloat, location: CGPoint, scrollOffset: CGPoint)
     case quickLook(point: CGPoint)
-    case imageWithSystemSymbolName(requestID: UUID,
-                                   alphaMaskData: Data?,
-                                   width: UInt32,
-                                   height: UInt32,
-                                   bytesPerRow: UInt32,
-                                   success: Bool,
-                                   errorMessage: String?)
     case textInput(text: String,
                    hasReplacementRange: Bool,
                    replacementLocation: UInt64,
@@ -292,21 +285,6 @@ enum BrowserToContentMessage {
             payload.append(float64: point.x)
             payload.append(float64: point.y)
             return makeBrowserToContentFrame(type: .quickLook, payload: payload)
-
-        case .imageWithSystemSymbolName(let requestID, let alphaMaskData, let width, let height, let bytesPerRow, let success, let errorMessage):
-            var payload = OffsetPayloadBuilder()
-            payload.append(uuid: requestID)
-            payload.append(uint32: width)
-            payload.append(uint32: height)
-            payload.append(uint32: bytesPerRow)
-            var flags: UInt8 = 0
-            if success { flags |= 1 << 0 }
-            if alphaMaskData != nil { flags |= 1 << 1 }
-            if errorMessage != nil { flags |= 1 << 2 }
-            payload.append(uint8: flags)
-            try payload.append(dataReference: alphaMaskData ?? Data())
-            try payload.append(stringReference: errorMessage ?? "")
-            return makeBrowserToContentFrame(type: .imageWithSystemSymbolName, payload: try payload.finalize())
 
         case .textInput(let text, let hasReplacementRange, let replacementLocation, let replacementLength):
             var payload = OffsetPayloadBuilder()
@@ -623,24 +601,6 @@ enum BrowserToContentMessage {
             }
             return .quickLook(point: CGPoint(x: x, y: y))
 
-        case .imageWithSystemSymbolName:
-            guard let requestID = cursor.readUUID(),
-                  let width = cursor.readUInt32(),
-                  let height = cursor.readUInt32(),
-                  let bytesPerRow = cursor.readUInt32(),
-                  let flags = cursor.readUInt8(),
-                  let alphaMaskDataReference = cursor.readDataReference(),
-                  let errorMessageReference = cursor.readStringReference() else {
-                throw OuterframeContentSocketMessageError.truncatedPayload
-            }
-
-            let alphaMaskData = flags & (1 << 1) != 0 ? alphaMaskDataReference : nil
-            let errorMessage = flags & (1 << 2) != 0 ? errorMessageReference : nil
-
-            return .imageWithSystemSymbolName(requestID: requestID, alphaMaskData: alphaMaskData,
-                                     width: width, height: height, bytesPerRow: bytesPerRow,
-                                     success: flags & (1 << 0) != 0, errorMessage: errorMessage)
-
         case .textInput:
             guard let text = cursor.readStringReference(),
                   let flags = cursor.readUInt8(),
@@ -753,11 +713,6 @@ enum ContentToBrowserMessage {
     case inputModeUpdate(inputMode: UInt8)
     case showContextMenu(attributedTextData: Data, locationX: CGFloat, locationY: CGFloat)
     case showDefinition(attributedTextData: Data, locationX: CGFloat, locationY: CGFloat)
-    case getImageWithSystemSymbolName(requestID: UUID,
-                                      symbolName: String,
-                                      pointSize: CGFloat,
-                                      weight: Float64,
-                                      scale: CGFloat)
     case textCursorUpdate(cursors: [OuterframeContentTextCursorSnapshot])
     case copySelectedPasteboardResponse(requestID: UUID, items: [OuterframeContentPasteboardItem])
     case openNewWindow(url: String, displayString: String?, preferredSize: CGSize?)
@@ -801,15 +756,6 @@ enum ContentToBrowserMessage {
             payload.append(float64: locationY)
             try payload.append(dataReference: attributedTextData)
             return makeContentToBrowserFrame(type: .showDefinition, payload: try payload.finalize())
-
-        case .getImageWithSystemSymbolName(let requestID, let symbolName, let pointSize, let weight, let scale):
-            var payload = OffsetPayloadBuilder()
-            payload.append(uuid: requestID)
-            try payload.append(stringReference: symbolName)
-            payload.append(float64: pointSize)
-            payload.append(float64: weight)
-            payload.append(float64: scale)
-            return makeContentToBrowserFrame(type: .getImageWithSystemSymbolName, payload: try payload.finalize())
 
         case .textCursorUpdate(let cursors):
             var payload = Data()
@@ -931,17 +877,6 @@ enum ContentToBrowserMessage {
             }
             return .showDefinition(attributedTextData: attributedTextData,
                                    locationX: locationX, locationY: locationY)
-
-        case .getImageWithSystemSymbolName:
-            guard let requestID = cursor.readUUID(),
-                  let symbolName = cursor.readStringReference(),
-                  let pointSize = cursor.readFloat64(),
-                  let weight = cursor.readFloat64(),
-                  let scale = cursor.readFloat64() else {
-                throw OuterframeContentSocketMessageError.truncatedPayload
-            }
-            return .getImageWithSystemSymbolName(requestID: requestID, symbolName: symbolName,
-                                    pointSize: pointSize, weight: weight, scale: scale)
 
         case .textCursorUpdate:
             guard let cursorCount = cursor.readUInt32() else {
@@ -1090,10 +1025,9 @@ private enum BrowserToContentMessageKind: UInt16 {
     case textInputFocus = 1023
     case textCommand = 1024
     case setCursorPosition = 1025
-    case imageWithSystemSymbolName = 1026
-    case copySelectedPasteboardRequest = 1027
-    case pasteboardContentDelivered = 1028
-    case accessibilitySnapshotRequest = 1029
+    case copySelectedPasteboardRequest = 1026
+    case pasteboardContentDelivered = 1027
+    case accessibilitySnapshotRequest = 1028
 }
 
 private enum ContentToBrowserMessageKind: UInt16 {
@@ -1104,13 +1038,12 @@ private enum ContentToBrowserMessageKind: UInt16 {
     case textCursorUpdate = 2004
     case showContextMenu = 2005
     case showDefinition = 2006
-    case getImageWithSystemSymbolName = 2007
-    case hapticFeedback = 2008
-    case copySelectedPasteboardResponse = 2009
-    case editingCapabilitiesUpdate = 2010
-    case accessibilitySnapshotResponse = 2011
-    case accessibilityTreeChanged = 2012
-    case openNewWindow = 2013
+    case hapticFeedback = 2007
+    case copySelectedPasteboardResponse = 2008
+    case editingCapabilitiesUpdate = 2009
+    case accessibilitySnapshotResponse = 2010
+    case accessibilityTreeChanged = 2011
+    case openNewWindow = 2012
 }
 
 // MARK: - Frame Helpers

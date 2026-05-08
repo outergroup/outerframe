@@ -737,80 +737,6 @@ final class OuterframeContentConnection: NSObject {
                                                    modifySelection: modifySelection))
     }
 
-    private func handleGetImageWithSystemSymbolName(requestID: UUID, symbolName: String, pointSize: CGFloat, weight: Double, scale: CGFloat) {
-        guard let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil) else {
-            self.sendImageWithSystemSymbolNameResponse(requestID: requestID, alphaMaskData: nil, width: 0, height: 0, bytesPerRow: 0, success: false, errorMessage: "Symbol '\(symbolName)' not found")
-            return
-        }
-
-        let symbolWeight = NSFont.Weight(CGFloat(weight))
-        let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: symbolWeight)
-        guard let configuredImage = image.withSymbolConfiguration(config) else {
-            self.sendImageWithSystemSymbolNameResponse(requestID: requestID, alphaMaskData: nil, width: 0, height: 0, bytesPerRow: 0, success: false, errorMessage: "Failed to configure symbol")
-            return
-        }
-
-        let pixelWidth = max(Int(ceil(configuredImage.size.width * scale)), 1)
-        let pixelHeight = max(Int(ceil(configuredImage.size.height * scale)), 1)
-        let rgbaBytesPerRow = pixelWidth * 4
-        var rgbaData = Data(count: rgbaBytesPerRow * pixelHeight)
-
-        let rendered = rgbaData.withUnsafeMutableBytes { bytes -> Bool in
-            guard let baseAddress = bytes.baseAddress,
-                  let context = CGContext(data: baseAddress,
-                                          width: pixelWidth,
-                                          height: pixelHeight,
-                                          bitsPerComponent: 8,
-                                          bytesPerRow: rgbaBytesPerRow,
-                                          space: CGColorSpaceCreateDeviceRGB(),
-                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
-                return false
-            }
-
-            NSGraphicsContext.saveGraphicsState()
-            NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
-            NSColor.clear.set()
-            NSRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight).fill()
-            configuredImage.draw(in: NSRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight), from: .zero, operation: .sourceOver, fraction: 1.0)
-            NSGraphicsContext.restoreGraphicsState()
-            return true
-        }
-
-        guard rendered else {
-            self.sendImageWithSystemSymbolNameResponse(requestID: requestID, alphaMaskData: nil, width: 0, height: 0, bytesPerRow: 0, success: false, errorMessage: "Failed to create bitmap")
-            return
-        }
-
-        var alphaMaskData = Data(count: pixelWidth * pixelHeight)
-        rgbaData.withUnsafeBytes { rgbaBytes in
-            alphaMaskData.withUnsafeMutableBytes { alphaBytes in
-                guard let rgbaBaseAddress = rgbaBytes.baseAddress,
-                      let alphaBaseAddress = alphaBytes.baseAddress else {
-                    return
-                }
-                let rgba = rgbaBaseAddress.assumingMemoryBound(to: UInt8.self)
-                let alpha = alphaBaseAddress.assumingMemoryBound(to: UInt8.self)
-                for y in 0..<pixelHeight {
-                    for x in 0..<pixelWidth {
-                        alpha[y * pixelWidth + x] = rgba[y * rgbaBytesPerRow + x * 4 + 3]
-                    }
-                }
-            }
-        }
-
-        self.sendImageWithSystemSymbolNameResponse(requestID: requestID, alphaMaskData: alphaMaskData, width: UInt32(pixelWidth), height: UInt32(pixelHeight), bytesPerRow: UInt32(pixelWidth), success: true, errorMessage: nil)
-    }
-
-    private func sendImageWithSystemSymbolNameResponse(requestID: UUID, alphaMaskData: Data?, width: UInt32, height: UInt32, bytesPerRow: UInt32, success: Bool, errorMessage: String?) {
-        sendToOuterframeContent(.imageWithSystemSymbolName(requestID: requestID,
-                                                           alphaMaskData: alphaMaskData,
-                                                           width: width,
-                                                           height: height,
-                                                           bytesPerRow: bytesPerRow,
-                                                           success: success,
-                                                           errorMessage: errorMessage))
-    }
-
     func sendToOuterframeContent(_ message: BrowserToContentMessage) {
         let pluginSocket = self.pluginSocket
         Task {
@@ -1015,17 +941,6 @@ extension OuterframeContentConnection: OuterframeContentSocketDelegate {
                 return
             }
             delegate.performHapticFeedback(feedbackStyle)
-
-        case .getImageWithSystemSymbolName(let requestID,
-                                           let symbolName,
-                                           let pointSize,
-                                           let weight,
-                                           let scale):
-            handleGetImageWithSystemSymbolName(requestID: requestID,
-                                               symbolName: symbolName,
-                                               pointSize: pointSize,
-                                               weight: weight,
-                                  scale: scale)
 
         case .textCursorUpdate(let cursors):
             guard let delegate = delegate else { return }

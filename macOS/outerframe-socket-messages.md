@@ -273,25 +273,6 @@ bytes 2..9:   float64 x
 bytes 10..17: float64 y
 ```
 
-### `imageWithSystemSymbolName` (`messageType = 1026`)
-
-Responds to a content request for a rendered SF Symbol alpha mask.
-
-Closest macOS/API mirror: `NSImage(systemSymbolName:accessibilityDescription:)` and `NSImage.SymbolConfiguration`.
-
-```text
-bytes 2..17:  UUID requestID
-bytes 18..21: UInt32 alpha mask width
-bytes 22..25: UInt32 alpha mask height
-bytes 26..29: UInt32 alpha mask bytesPerRow
-byte 30:      UInt8 flags
-              bit 0 = success
-              bit 1 = hasAlphaMaskData
-              bit 2 = hasErrorMessage
-bytes 31..38: DataRef32 alpha8 mask data, empty when absent
-bytes 39..46: StringRef32 errorMessage, empty when absent
-```
-
 ### `textInput` (`messageType = 1020`)
 
 Inserts committed text, optionally replacing a range.
@@ -399,7 +380,7 @@ byte 2: UInt8 flags
         bit 0 = isFocused
 ```
 
-### `copySelectedPasteboardRequest` (`messageType = 1027`)
+### `copySelectedPasteboardRequest` (`messageType = 1026`)
 
 Requests pasteboard items for the current selection.
 
@@ -409,7 +390,7 @@ Closest macOS/API mirror: `copy(_:)` and `NSPasteboard`, but this is a request/r
 bytes 2..17: UUID requestID
 ```
 
-### `pasteboardContentDelivered` (`messageType = 1028`)
+### `pasteboardContentDelivered` (`messageType = 1027`)
 
 Delivers pasteboard items to content for a paste operation.
 
@@ -423,7 +404,7 @@ pasteboard item record i, B = 4 + 16*i:
   bytes B+8..B+15:       DataRef32 item data
 ```
 
-### `accessibilitySnapshotRequest` (`messageType = 1029`)
+### `accessibilitySnapshotRequest` (`messageType = 1028`)
 
 Requests an accessibility tree snapshot from content.
 
@@ -433,7 +414,7 @@ Closest macOS/API mirror: `NSAccessibility`.
 bytes 2..17: UUID requestID
 ```
 
-### `historyEntryAccepted` (`messageType = 1030`)
+### `historyEntryAccepted` (`messageType = 1029`)
 
 Acknowledges that a browser-side history entry was accepted.
 
@@ -444,7 +425,7 @@ bytes 2..17:  UUID entryID
 bytes 18..25: StringRef32 URL
 ```
 
-### `historyEntryRejected` (`messageType = 1031`)
+### `historyEntryRejected` (`messageType = 1030`)
 
 Reports that a browser-side history entry was rejected.
 
@@ -455,7 +436,7 @@ bytes 2..17:  UUID entryID
 bytes 18..25: StringRef32 errorMessage
 ```
 
-### `historyTraversal` (`messageType = 1032`)
+### `historyTraversal` (`messageType = 1031`)
 
 Notifies content of a committed history traversal.
 
@@ -466,7 +447,7 @@ bytes 2..17:  UUID entryID
 bytes 18..25: StringRef32 URL
 ```
 
-### `historyContextUpdate` (`messageType = 1033`)
+### `historyContextUpdate` (`messageType = 1032`)
 
 Sends the current browser history context.
 
@@ -571,20 +552,6 @@ bytes 10..17: float64 locationY
 bytes 18..25: DataRef32 attributed text as RTF data
 ```
 
-### `getImageWithSystemSymbolName` (`messageType = 2007`)
-
-Requests a rendered SF Symbol alpha mask from the host.
-
-Closest macOS/API mirror: `NSImage(systemSymbolName:accessibilityDescription:)` and `NSImage.SymbolConfiguration`.
-
-```text
-bytes 2..17:  UUID requestID
-bytes 18..25: StringRef32 symbolName
-bytes 26..33: float64 pointSize
-bytes 34..41: float64 NSFont.Weight rawValue
-bytes 42..49: float64 scale
-```
-
 ### `textCursorUpdate` (`messageType = 2004`)
 
 Sends text cursor rectangles for host IME/caret UI.
@@ -604,7 +571,7 @@ cursor record i, B = 6 + 49*i:
                       bit 0 = visible
 ```
 
-### `copySelectedPasteboardResponse` (`messageType = 2009`)
+### `copySelectedPasteboardResponse` (`messageType = 2008`)
 
 Responds to a copy request with pasteboard items.
 
@@ -619,7 +586,7 @@ pasteboard item record i, B = 20 + 16*i:
   bytes B+8..B+15:       DataRef32 item data
 ```
 
-### `openNewWindow` (`messageType = 2013`)
+### `openNewWindow` (`messageType = 2012`)
 
 Requests that the host open a new window for a URL.
 
@@ -635,7 +602,7 @@ bytes 19..26: float64 preferredSize.width, 0 when absent
 bytes 27..34: float64 preferredSize.height, 0 when absent
 ```
 
-### `setPasteboardCapabilities` (`messageType = 2010`)
+### `setPasteboardCapabilities` (`messageType = 2009`)
 
 Updates whether content can copy/cut and what pasteboard types it accepts.
 
@@ -651,7 +618,7 @@ pasteboard type reference i, B = 5 + 8*i:
   bytes B..B+7:     StringRef32 pasteboard type identifier
 ```
 
-### `accessibilitySnapshotResponse` (`messageType = 2011`)
+### `accessibilitySnapshotResponse` (`messageType = 2010`)
 
 Responds with a serialized content-provided accessibility tree.
 
@@ -701,7 +668,7 @@ byte 73:       UInt8 flags
 
 Node record offsets must point within the snapshot data. String offsets must point after the node table and within the snapshot data. Fields marked absent by `flags` must have zero values.
 
-### `accessibilityTreeChanged` (`messageType = 2012`)
+### `accessibilityTreeChanged` (`messageType = 2011`)
 
 Requests that the host post accessibility change notifications.
 
@@ -714,7 +681,7 @@ byte 2: UInt8 notificationMask
         bit 2 = focusedElementChanged
 ```
 
-### `hapticFeedback` (`messageType = 2008`)
+### `hapticFeedback` (`messageType = 2007`)
 
 Requests haptic feedback.
 
@@ -727,7 +694,7 @@ byte 2: UInt8 style
         2 = levelChange
 ```
 
-### `historyPushEntry` (`messageType = 2014`)
+### `historyPushEntry` (`messageType = 2013`)
 
 Requests that the host push a browser history entry.
 
@@ -740,7 +707,7 @@ byte 18:      UInt8 flags
 bytes 19..26: StringRef32 URL, empty when absent
 ```
 
-### `historyReplaceEntry` (`messageType = 2015`)
+### `historyReplaceEntry` (`messageType = 2014`)
 
 Requests that the host replace a browser history entry.
 
@@ -753,7 +720,7 @@ byte 18:      UInt8 flags
 bytes 19..26: StringRef32 URL, empty when absent
 ```
 
-### `historyGo` (`messageType = 2016`)
+### `historyGo` (`messageType = 2015`)
 
 Requests relative browser history traversal.
 

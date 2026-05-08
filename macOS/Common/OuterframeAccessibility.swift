@@ -76,13 +76,13 @@ public struct OuterframeAccessibilitySnapshot: Sendable {
     /// Convenience helper for content that has not implemented accessibility yet.
     public static func notImplementedSnapshot(message: String = "Accessibility not implemented") -> OuterframeAccessibilitySnapshot {
         let child = OuterframeAccessibilityNode(identifier: 1,
-                                            role: .staticText,
-                                            frame: .zero,
-                                            label: message)
+                                                role: .staticText,
+                                                frame: .zero,
+                                                label: message)
         let root = OuterframeAccessibilityNode(identifier: 0,
-                                           role: .container,
-                                           frame: .zero,
-                                           children: [child])
+                                               role: .container,
+                                               frame: .zero,
+                                               children: [child])
         return OuterframeAccessibilitySnapshot(rootNodes: [root])
     }
 

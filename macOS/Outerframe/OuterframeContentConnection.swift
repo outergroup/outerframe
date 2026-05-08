@@ -93,8 +93,8 @@ struct OuterframeContentEditingCapabilities: Sendable {
     var acceptablePasteboardTypeIdentifiers: [String]
 
     init(canCopy: Bool,
-                canCut: Bool,
-                acceptablePasteboardTypeIdentifiers: [String]) {
+         canCut: Bool,
+         acceptablePasteboardTypeIdentifiers: [String]) {
         self.canCopy = canCopy
         self.canCut = canCut
         self.acceptablePasteboardTypeIdentifiers = acceptablePasteboardTypeIdentifiers
@@ -507,7 +507,7 @@ final class OuterframeContentConnection: NSObject {
         }
 
         let infraMessage = BrowserToContentInfraMessage.loadPlugin(requestID: requestID,
-                                                                  pluginURL: url.absoluteString)
+                                                                   pluginURL: url.absoluteString)
 
         var proxy: InitializeContentProxy?
         if let proxyHost, let proxyPort = networkProxyPort {

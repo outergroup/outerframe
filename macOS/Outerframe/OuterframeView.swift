@@ -464,8 +464,8 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
 
         if debugModeObserver == nil {
             debugModeObserver = NotificationCenter.default.addObserver(forName: OuterframeDebugSettings.debugModeDidChangeNotification,
-                                                                        object: nil,
-                                                                        queue: .main) { [weak self] _ in
+                                                                       object: nil,
+                                                                       queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
                     self?.handleDebugModePreferenceChange()
                 }
@@ -474,8 +474,8 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
 
         if autoResumeObserver == nil {
             autoResumeObserver = NotificationCenter.default.addObserver(forName: OuterframeDebugSettings.autoResumeDidChangeNotification,
-                                                                         object: nil,
-                                                                         queue: .main) { [weak self] _ in
+                                                                        object: nil,
+                                                                        queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
                     self?.updateDebugOverlayAutoResumeState()
                 }

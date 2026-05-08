@@ -21,8 +21,8 @@ Example outerframe content:
 - Run [Top](https://github.com/outergroup/top) backend
 - Clone example projects in [Swift](https://github.com/outergroup/hello-outerframe-macOS-swift) or [C](https://github.com/outergroup/hello-outerframe-macOS-objc) and vibe-code something for yourself.
 - Browse the Outerframe Cookbook:
-  - Swift: https://probablymarcus.com/cookbook-swift.outer  (view in Outer Loop or Outer Frame)
-  - C: https://probablymarcus.com/cookbook-objc.outer  (view in Outer Loop or Outer Frame)
+  - Swift: https://probablymarcus.com/cookbook-macos-swift.outer  (view in Outer Loop or Outer Frame)
+  - C: https://probablymarcus.com/cookbook-macos-objc.outer  (view in Outer Loop or Outer Frame)
   - Source: [outerframe-cookbook](https://github.com/outergroup/outerframe-cookbook)
 
 

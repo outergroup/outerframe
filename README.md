@@ -6,7 +6,7 @@ This repo contains a working outerframe implementation for macOS. [Outer Loop](h
 
 Read more:
 - June 2025: ["The web could use machine code"](https://probablymarcus.com/blocks/2025/06/08/the-web-could-use-machine-code.html)
-- April 2026: ["It's like a web view, but native"](https://probablymarcus.com/blocks/2026/04/28/like-a-web-view-but-native.html)
+- May 2026: ["It's like a web view, but native"](https://probablymarcus.com/blocks/2026/05/10/like-a-web-view-but-native.html)
 
 There are two ways you might play with this:
 - embed the outerframe in your own native macOS apps

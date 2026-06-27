@@ -9,6 +9,7 @@ struct SpawnedOuterframeContentLaunch {
     let pluginSocketFD: Int32
     let networkProxyPort: UInt16?
     let hostBundleIdentifier: String
+    let stagedFileDirectoryPath: String?
 }
 
 func parseSpawnedLaunch() -> SpawnedOuterframeContentLaunch {
@@ -22,6 +23,7 @@ func parseSpawnedLaunch() -> SpawnedOuterframeContentLaunch {
     var pluginSocketFD: Int32?
     var networkProxyPort: UInt16?
     var hostBundleIdentifier: String?
+    var stagedFileDirectoryPath: String?
 
     var iterator = args.makeIterator()
     while let argument = iterator.next() {
@@ -54,6 +56,13 @@ func parseSpawnedLaunch() -> SpawnedOuterframeContentLaunch {
             }
             hostBundleIdentifier = value
 
+        case "--staged-file-directory":
+            guard let value = iterator.next(), !value.isEmpty else {
+                print("OuterframeContent: --staged-file-directory requires a non-empty value")
+                exit(1)
+            }
+            stagedFileDirectoryPath = value
+
         default:
             continue
         }
@@ -75,11 +84,13 @@ func parseSpawnedLaunch() -> SpawnedOuterframeContentLaunch {
     return SpawnedOuterframeContentLaunch(infrastructureSocketFD: infrastructureSocketFD,
                                           pluginSocketFD: pluginSocketFD,
                                           networkProxyPort: networkProxyPort,
-                                          hostBundleIdentifier: hostBundleIdentifier)
+                                          hostBundleIdentifier: hostBundleIdentifier,
+                                          stagedFileDirectoryPath: stagedFileDirectoryPath)
 }
 
 let launch = parseSpawnedLaunch()
 OuterframeContentRuntime.run(infrastructureSocketFD: launch.infrastructureSocketFD,
                              pluginSocketFD: launch.pluginSocketFD,
                              networkProxyPort: launch.networkProxyPort,
-                             hostBundleIdentifier: launch.hostBundleIdentifier)
+                             hostBundleIdentifier: launch.hostBundleIdentifier,
+                             stagedFileDirectoryPath: launch.stagedFileDirectoryPath)

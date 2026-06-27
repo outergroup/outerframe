@@ -8,13 +8,35 @@ func sandbox_init_with_parameters(_ profile: UnsafePointer<CChar>, _ flags: UInt
 func sandbox_check(_ pid: pid_t, _ operation: UnsafePointer<CChar>?, _ type: Int32, _ args: CVarArg...) -> Int32
 
 public struct OuterSandbox {
-    private static func makeProfile(networkRule: String, allowedReadPaths: [String]) -> String {
-        let readPathRules = allowedReadPaths.isEmpty ? "" : """
+    private static func makeProfile(networkRule: String,
+                                    allowedReadPathParameterNames: [String],
+                                    runtimeDirectoryParameterName: String,
+                                    stagedFileDirectoryParameterName: String?) -> String {
+        let readPathRules = allowedReadPathParameterNames.isEmpty ? "" : """
 
         ;; Additional allowed read paths (e.g., local bundle for debugging)
         (allow file-read* file-test-existence file-map-executable
-            \(allowedReadPaths.map { "(subpath \"\($0)\")" }.joined(separator: "\n        ")))
+            \(allowedReadPathParameterNames.map { "(subpath (param \"\($0)\"))" }.joined(separator: "\n        ")))
         """
+        let stagedFileDirectoryRule = stagedFileDirectoryParameterName.map { parameterName in
+            """
+
+        ;; Host-readable staging directory for file promises and dropped-file access
+        (allow file-read*
+            file-test-existence
+            file-write-create
+            file-write-data
+            file-write-flags
+            file-write-mode
+            file-write-owner
+            file-write-setugid
+            file-write-times
+            file-write-unlink
+            file-write-xattr
+            file-ioctl
+            (subpath (param "\(parameterName)")))
+        """
+        } ?? ""
 
         return """
         (version 1)
@@ -27,7 +49,6 @@ public struct OuterSandbox {
         
         ;; Process introspection
         (allow process-info* (target self))
-        (allow sysctl-read)
         
         ;; ===== FILESYSTEM ACCESS =====
         
@@ -76,26 +97,29 @@ public struct OuterSandbox {
             (literal "/dev/null")
             (literal "/dev/zero"))
         
-        ;; Temporary directories (for downloads and caches)
-        (allow file-read* file-test-existence file-write*
-            (subpath "/private/tmp")
-            (subpath "/private/var/folders"))
+        ;; Runtime temp/cache directory
+        (allow file-read*
+            file-test-existence
+            file-write-create
+            file-write-data
+            file-write-flags
+            file-write-mode
+            file-write-owner
+            file-write-setugid
+            file-write-times
+            file-write-unlink
+            file-write-xattr
+            file-ioctl
+            (subpath (param "\(runtimeDirectoryParameterName)")))
+        \(stagedFileDirectoryRule)
         
         ;; Application resources
         (allow file-read* file-test-existence
             (subpath "/Applications"))
         
-        ;; User preferences and caches
-        (allow file-read*
-            (subpath (string-append (param "HOME_DIR") "/Library/Preferences")))
-        
-        ;; Application cache directory
-        (allow file-read* file-test-existence file-write* file-ioctl
-            (subpath (string-append (param "HOME_DIR") "/Library/Caches/" (param "APP_BUNDLE_ID"))))
-        
         ;; Outerframe bundle cache
         (allow file-read* file-test-existence file-map-executable
-            (subpath (string-append (param "HOME_DIR") "/Library/Containers/" (param "APP_BUNDLE_ID") "/Data/Library/" (param "APP_BUNDLE_ID"))))
+            (subpath (string-append (param "HOME_DIR") "/Library/Caches/" (param "APP_BUNDLE_ID") "/OuterframeBundleCache")))
         
         ;; Graphics and media resources
         (allow file-read*
@@ -119,20 +143,22 @@ public struct OuterSandbox {
             (path "/Library/MessageTracer/SubmitDiagInfo.default.domains.searchtree")
             (path "/System/Library/MessageTracer/SubmitDiagInfo.default.domains.searchtree"))
         
-        ;; Metal shader compilation
-        (allow file-issue-extension
-            (require-all
-                (extension-class "com.apple.app-sandbox.read")
-                (subpath "/")))
-        
         ;; ===== USER PREFERENCES =====
-        
-        (allow user-preference-read)
         
         ;; System preferences
         (allow user-preference-read
+            (preference-domain "com.apple.Accessibility")
+            (preference-domain "com.apple.coreanimation")
+            (preference-domain "com.apple.CoreGraphics")
+            (preference-domain "com.apple.coremedia")
+            (preference-domain "com.apple.corevideo")
+            (preference-domain "com.apple.HIToolbox")
             (preference-domain "com.apple.loginwindow")
             (preference-domain "com.apple.MCX")
+            (preference-domain "com.apple.security")
+            (preference-domain "com.apple.security_common")
+            (preference-domain "com.apple.SwiftUI")
+            (preference-domain "com.apple.universalaccess")
             (preference-domain "kCFPreferencesAnyApplication"))
         
         ;; App-specific preferences
@@ -214,16 +240,6 @@ public struct OuterSandbox {
             (iokit-user-client-class "RootDomainUserClient")
             (iokit-user-client-class "H11ANEInDirectPathClient"))
         
-        ;; Display properties
-        (allow iokit-set-properties
-            (require-all (iokit-connection "IODisplay")
-                (require-any (iokit-property "brightness")
-                    (iokit-property "linear-brightness")
-                    (iokit-property "commit")
-                    (iokit-property "rgcs")
-                    (iokit-property "ggcs")
-                    (iokit-property "bgcs"))))
-        
         ;; ===== SYSTEM INFORMATION =====
         
         (allow sysctl-read
@@ -233,11 +249,6 @@ public struct OuterSandbox {
             (sysctl-name "hw.memsize")
             (sysctl-name "hw.model")
             (sysctl-name "kern.osvariant_status"))
-        
-        ;; ===== PROCESS CONTROL =====
-        
-        (allow process-exec*)
-        (allow process-fork)
         
         ;; ===== NETWORKING =====
 
@@ -262,7 +273,9 @@ public struct OuterSandbox {
     
     public static func apply(bundleId: String? = nil,
                              allowedProxyPort: UInt16? = nil,
-                             allowedReadPaths: [String] = []) -> (success: Bool, error: String?) {
+                             allowedReadPaths: [String] = [],
+                             runtimeDirectoryPath: String,
+                             stagedFileDirectoryPath: String? = nil) -> (success: Bool, error: String?) {
         // Check if already sandboxed
         if isSandboxed() {
             return (false, "Process is already sandboxed")
@@ -279,6 +292,27 @@ public struct OuterSandbox {
             paramStrings.append(value)
         }
 
+        let runtimeDirectoryParameterName = "RUNTIME_DIRECTORY"
+        paramStrings.append(runtimeDirectoryParameterName)
+        paramStrings.append(runtimeDirectoryPath)
+
+        let stagedFileDirectoryParameterName: String?
+        if let stagedFileDirectoryPath, !stagedFileDirectoryPath.isEmpty {
+            let parameterName = "STAGED_FILE_DIRECTORY"
+            paramStrings.append(parameterName)
+            paramStrings.append(stagedFileDirectoryPath)
+            stagedFileDirectoryParameterName = parameterName
+        } else {
+            stagedFileDirectoryParameterName = nil
+        }
+
+        let allowedReadPathParameterNames = allowedReadPaths.enumerated().map { index, path in
+            let parameterName = "ALLOWED_READ_PATH_\(index)"
+            paramStrings.append(parameterName)
+            paramStrings.append(path)
+            return parameterName
+        }
+
         let networkRule: String
         if let allowedProxyPort {
             networkRule = """
@@ -291,7 +325,10 @@ public struct OuterSandbox {
         """
         }
 
-        let profileString = makeProfile(networkRule: networkRule, allowedReadPaths: allowedReadPaths)
+        let profileString = makeProfile(networkRule: networkRule,
+                                        allowedReadPathParameterNames: allowedReadPathParameterNames,
+                                        runtimeDirectoryParameterName: runtimeDirectoryParameterName,
+                                        stagedFileDirectoryParameterName: stagedFileDirectoryParameterName)
 
         // Apply sandbox - need to keep strings alive during the call
         var errorBuf: UnsafeMutablePointer<CChar>? = nil

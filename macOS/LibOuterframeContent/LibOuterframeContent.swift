@@ -1,6 +1,41 @@
 import Darwin
 import Foundation
 
+private func canonicalURL(for url: URL) -> URL {
+    let path = url.path
+    let canonicalPath = path.withCString { pointer -> String in
+        var resolved = [CChar](repeating: 0, count: Int(PATH_MAX))
+        if realpath(pointer, &resolved) != nil {
+            return String(cString: resolved)
+        }
+        return path
+    }
+    return URL(fileURLWithPath: canonicalPath, isDirectory: true)
+}
+
+private func createRuntimeDirectory() throws -> URL {
+    let baseURL = canonicalURL(for: FileManager.default.temporaryDirectory)
+        .appendingPathComponent("org.outerframe.OuterframeContent", isDirectory: true)
+    return baseURL.appendingPathComponent(UUID().uuidString, isDirectory: true)
+}
+
+private func configureRuntimeDirectory(_ runtimeURL: URL) throws -> URL {
+    try FileManager.default.createDirectory(at: runtimeURL,
+                                            withIntermediateDirectories: true)
+
+    let runtimeURL = canonicalURL(for: runtimeURL)
+    let cacheURL = runtimeURL.appendingPathComponent("cache", isDirectory: true)
+
+    try FileManager.default.createDirectory(at: cacheURL,
+                                            withIntermediateDirectories: true)
+
+    setenv("TMPDIR", runtimeURL.path + "/", 1)
+    setenv("XDG_CACHE_HOME", cacheURL.path, 1)
+
+    print("OuterframeContent: Runtime directory: \(runtimeURL.path)")
+    return runtimeURL
+}
+
 public struct OuterframeContentRuntime {
     public static func configureOutputBuffering() {
         setvbuf(stdout, nil, _IONBF, 0)
@@ -11,13 +46,36 @@ public struct OuterframeContentRuntime {
                            pluginSocketFD: Int32,
                            networkProxyPort: UInt16?,
                            hostBundleIdentifier: String,
-                           allowedReadPaths: [String] = [],
-                           monitorParentProcess: Bool = true) -> Never {
+                           stagedFileDirectoryPath: String? = nil,
+                           allowedReadPaths: [String] = []) -> Never {
         print("OuterframeContent starting...")
+
+        let runtimeDirectory: URL
+        let effectiveStagedFileDirectoryPath: String?
+        do {
+            if let providedStagedFileDirectoryPath = stagedFileDirectoryPath,
+               !providedStagedFileDirectoryPath.isEmpty {
+                let stagedFileDirectoryURL = URL(fileURLWithPath: providedStagedFileDirectoryPath,
+                                                 isDirectory: true)
+                runtimeDirectory = try configureRuntimeDirectory(stagedFileDirectoryURL)
+                effectiveStagedFileDirectoryPath = runtimeDirectory.path
+                setenv("OUTERFRAME_STAGING_DIR", runtimeDirectory.path, 1)
+                print("OuterframeContent: Staged file directory: \(runtimeDirectory.path)")
+            } else {
+                runtimeDirectory = try configureRuntimeDirectory(createRuntimeDirectory())
+                effectiveStagedFileDirectoryPath = nil
+                unsetenv("OUTERFRAME_STAGING_DIR")
+            }
+        } catch {
+            print("OuterframeContent: Failed to create runtime directory: \(error)")
+            exit(0)
+        }
 
         let sandboxResult = OuterSandbox.apply(bundleId: hostBundleIdentifier,
                                                allowedProxyPort: networkProxyPort,
-                                               allowedReadPaths: allowedReadPaths)
+                                               allowedReadPaths: allowedReadPaths,
+                                               runtimeDirectoryPath: runtimeDirectory.path,
+                                               stagedFileDirectoryPath: effectiveStagedFileDirectoryPath)
         guard sandboxResult.success else {
             print("OuterframeContent: Failed to apply sandbox: \(sandboxResult.error ?? "Unknown error")")
             exit(0)
@@ -45,10 +103,6 @@ public struct OuterframeContentRuntime {
             }
         }
 
-        if monitorParentProcess {
-            monitorParentProcessExit()
-        }
-
         RunLoop.main.run()
         fatalError("RunLoop.main.run() returned unexpectedly")
     }
@@ -57,29 +111,6 @@ public struct OuterframeContentRuntime {
 nonisolated(unsafe) var infraSocketActor: InfraSocket!
 nonisolated(unsafe) var outerlayerHost: OuterlayerHost!
 nonisolated(unsafe) var debuggerAttachmentMonitorTask: Task<Void, Never>?
-
-nonisolated(unsafe) private var parentTerminationSource: DispatchSourceProcess?
-
-private func monitorParentProcessExit() {
-    let parentPID = getppid()
-    guard parentPID > 1 else {
-        print("OuterframeContent: Parent already exited, terminating")
-        exit(0)
-    }
-
-    let source = DispatchSource.makeProcessSource(identifier: pid_t(parentPID),
-                                                  eventMask: .exit,
-                                                  queue: .main)
-    source.setEventHandler {
-        print("OuterframeContent: Parent process exited, terminating")
-        exit(0)
-    }
-    source.setCancelHandler {
-        print("OuterframeContent: Parent monitor cancelled")
-    }
-    parentTerminationSource = source
-    source.resume()
-}
 
 func startDebuggerAttachmentMonitor() {
     debuggerAttachmentMonitorTask?.cancel()

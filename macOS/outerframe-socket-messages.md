@@ -380,7 +380,7 @@ byte 2: UInt8 flags
         bit 0 = isFocused
 ```
 
-### `copySelectedPasteboardRequest` (`messageType = 1026`)
+### `selectionToPasteboardCopyRequest` (`messageType = 1026`)
 
 Requests pasteboard items for the current selection.
 
@@ -390,23 +390,109 @@ Closest macOS/API mirror: `copy(_:)` and `NSPasteboard`, but this is a request/r
 bytes 2..17: UUID requestID
 ```
 
-### `pasteboardContentDelivered` (`messageType = 1027`)
+### `selectionToPasteboardCutRequest` (`messageType = 1037`)
+
+Requests pasteboard items for the current selection and asks content to remove that selection as part of the same user-initiated cut operation. Content replies with `selectionToPasteboardResponse`.
+
+Closest macOS/API mirror: `cut(_:)` and `NSPasteboard`, but this is a request/response protocol instead of direct pasteboard access.
+
+```text
+bytes 2..17: UUID requestID
+```
+
+### `editCommandValidationRequest` (`messageType = 1040`)
+
+Synchronously asks which edit commands content can currently perform.
+
+Closest macOS/API mirror: `validateUserInterfaceItem(_:)` and edit-menu validation.
+
+```text
+bytes 2..17: UUID requestID
+bytes 18..21: UInt32 requestedCommands bitmask
+              bit 0 = copy
+              bit 1 = cut
+              bit 2 = paste
+              bit 3 = selectAll
+              bit 4 = find
+              bit 5 = findNext
+              bit 6 = findPrevious
+```
+
+### `pasteboardContentPasted` (`messageType = 1027`)
 
 Delivers pasteboard items to content for a paste operation.
 
 Closest macOS/API mirror: `NSPasteboard` and `NSPasteboardItem`.
 
 ```text
-bytes 2..3:              UInt16 item count, N
-bytes 4..<4+16*N:        N pasteboard item records
-pasteboard item record i, B = 4 + 16*i:
+bytes 2..3:              UInt16 pasteboard item count, N
+then N pasteboard item records:
+  UInt16 representation count, R
+  then R representation records:
+    StringRef32 pasteboard type identifier
+    DataRef32 representation data
+```
+
+### `pasteboardContentDropped` (`messageType = 1035`)
+
+Delivers pasteboard items to content as the result of a native drop onto the outerframe view. The host reads `NSPasteboard` and converts accepted items into the socket pasteboard record format so sandboxed content never needs direct pasteboard access.
+
+Closest macOS/API mirror: `NSDraggingDestination.performDragOperation(_:)`, `NSPasteboard`, and `NSPasteboardItem`.
+
+```text
+bytes 2..9:              float64 locationX
+bytes 10..17:            float64 locationY
+bytes 18..19:            UInt16 pasteboard item count, N
+then N pasteboard item records:
+  UInt16 representation count, R
+  then R representation records:
+    StringRef32 pasteboard type identifier
+    DataRef32 representation data
+```
+
+### `pasteboardDropHitTestRequest` (`messageType = 1038`)
+
+Synchronously asks content whether a native drag should be accepted at a view-local point. The host sends this only when pasteboard acceptance mode is `hitTest`. The host does not use the accepted pasteboard type list as a validation prefilter in this mode; content receives the visible pasteboard type identifiers and makes the type and location decision.
+
+Closest macOS/API mirror: `NSDraggingDestination.draggingEntered(_:)` and `draggingUpdated(_:)`.
+
+```text
+bytes 2..17:             UUID requestID
+bytes 18..25:            float64 locationX
+bytes 26..33:            float64 locationY
+bytes 34..37:            UInt32 source operation mask
+bytes 38..45:            UInt64 modifier flags rawValue
+bytes 46..47:            UInt16 pasteboard type count, N
+bytes 48..<48+8*N:       N pasteboard type references
+pasteboard type reference i, B = 48 + 8*i:
   bytes B..B+7:          StringRef32 pasteboard type identifier
-  bytes B+8..B+15:       DataRef32 item data
+```
+
+Content should reply with `pasteboardDropHitTestResponse` immediately. The host may time out and reject the location if content does not answer within the host's validation timeout.
+
+### `pasteboardAccessResponse` (`messageType = 1034`)
+
+Responds to a content-originated programmatic pasteboard access request.
+
+Closest macOS/API mirror: `NSPasteboard`, with host policy gating. Context-menu and keyboard edit commands use host-originated messages such as `selectionToPasteboardCopyRequest` / `pasteboardContentPasted`; this response is only for content-originated access requests.
+
+```text
+bytes 2..17:             UUID requestID
+byte 18:                 UInt8 flags
+                         bit 0 = granted
+bytes 19..20:            UInt16 pasteboard item count, N
+then N pasteboard item records:
+  UInt16 representation count, R
+  then R representation records:
+    StringRef32 pasteboard type identifier
+    DataRef32 representation data
 ```
 
 ### `accessibilitySnapshotRequest` (`messageType = 1028`)
 
-Requests an accessibility tree snapshot from content.
+Requests an accessibility tree snapshot from content. The browser sends this while handling a host accessibility query and waits synchronously for the matching `accessibilitySnapshotResponse` until a browser-defined timeout expires. The browser does not return a previously cached snapshot while waiting and does not keep a stale host-side snapshot after content reports a tree change.
+
+Content should compute and send the response promptly on its normal UI state. If content cannot provide a tree, it should still answer with an absent snapshot or an explicit not-implemented snapshot rather than deferring the response to unrelated async work.
 
 Closest macOS/API mirror: `NSAccessibility`.
 
@@ -460,6 +546,17 @@ bytes 26..29: UInt32 history length
 byte 30:      UInt8 flags
               bit 0 = canGoBack
               bit 1 = canGoForward
+```
+
+### `contextMenuItemSelected` (`messageType = 1033`)
+
+Reports that the user selected a content-command item from a content-provided context menu.
+
+Closest macOS/API mirror: `NSMenuItem` action dispatch. The `menuID` is the content-provided menu identifier from `showContextMenuItems`, and `itemID` is the content-provided identifier for the selected item. Items with a standard action, such as `standardCopy`, are handled by the browser and do not send this message.
+
+```text
+bytes 2..17:  UUID menuID
+bytes 18..25: StringRef32 itemID
 ```
 
 ### `shutdown` (`messageType = 1002`)
@@ -540,6 +637,73 @@ bytes 10..17: float64 locationY
 bytes 18..25: DataRef32 attributed text as RTF data
 ```
 
+### `showContextMenuItems` (`messageType = 2016`)
+
+Requests a context menu made from content-provided menu item snapshots at a content point. Each item carries a kind, action, state, optional styling, and optional children. When the user chooses an enabled command item whose action is `contentCommand`, the browser sends `contextMenuItemSelected` back to content with the same `menuID` and that item's `itemID`. Standard actions are handled by the browser. The optional attributed text is the selected text used by standard lookup and Services items.
+
+Closest macOS/API mirror: AppKit contextual menus (`NSMenu` and `NSMenuItem`) with target/action callbacks.
+
+```text
+bytes 2..17:             UUID menuID
+bytes 18..25:            float64 locationX
+bytes 26..33:            float64 locationY
+byte 34:                 UInt8 flags
+                         bit 0 = has attributed text
+bytes 35..36:            UInt16 root item count, N
+bytes 37..44:            DataRef32 attributed text as RTF data, or empty data if not present
+bytes 45..end:           N recursive menu item records
+
+menu item record:
+  byte +0:               UInt8 kind
+                         0 = command
+                         1 = separator
+                         2 = submenu
+                         3 = label
+  byte +1:               UInt8 action
+                         0 = contentCommand
+                         1 = standardCopy
+                         2 = standardPaste
+                         3 = standardCut
+                         4 = standardSelectAll
+                         5 = standardLookUp
+                         6 = standardServices
+  byte +2:               UInt8 isEnabled
+  byte +3:               UInt8 state
+                         0 = off
+                         1 = on
+                         2 = mixed
+  bytes +4..+5:          UInt16 indentationLevel
+  bytes +6..+7:          UInt16 child item count, C
+  bytes +8..+11:         UInt32 keyEquivalentModifierMask
+  bytes +12..+15:        float32 style.height, or 0 for default
+  bytes +16..+19:        float32 style.topInset
+  bytes +20..+23:        float32 style.leftInset
+  bytes +24..+27:        float32 style.bottomInset
+  bytes +28..+31:        float32 style.rightInset
+  bytes +32..+35:        float32 style.fontSize, or 0 for default
+  bytes +36..+39:        float32 style.fontWeight, AppKit NSFont.Weight raw value or 0 for default
+  bytes +40..+43:        UInt32 style.textColorRGBA, 0 for default
+  byte +44:              UInt8 style.alignment
+                         0 = natural
+                         1 = left
+                         2 = center
+                         3 = right
+  bytes +45..+47:        reserved, must be 0
+  bytes +48..+55:        StringRef32 itemID
+  bytes +56..+63:        StringRef32 title
+  bytes +64..+71:        StringRef32 keyEquivalent
+  bytes +72..+79:        StringRef32 systemImageName
+  bytes +80..:           C child item records
+```
+
+`command` items render as native `NSMenuItem`s. `separator` items render as native separators. `submenu` items render as native `NSMenuItem`s with a child `NSMenu`. `label` items render as disabled custom rows using the supplied style fields. Empty item arrays are valid on the wire, but the current browser UI does not show a menu for them.
+
+`standardCopy` uses the existing pasteboard request/response path: the browser sends `selectionToPasteboardCopyRequest`, content replies with `selectionToPasteboardResponse`, and the browser writes the returned pasteboard items to `NSPasteboard`.
+
+`standardPaste` uses the browser's normal paste path. The browser reads `NSPasteboard` under host policy and delivers accepted pasteboard items using `pasteboardContentPasted`.
+
+`standardCut`, `standardSelectAll`, `standardLookUp`, and `standardServices` use the browser's normal AppKit edit/lookup/services paths. `standardLookUp` and `standardServices` use the optional attributed text carried by this message.
+
 ### `showDefinition` (`messageType = 2006`)
 
 Requests the host definition/lookup UI for attributed text at a content point.
@@ -552,26 +716,24 @@ bytes 10..17: float64 locationY
 bytes 18..25: DataRef32 attributed text as RTF data
 ```
 
-### `textCursorUpdate` (`messageType = 2004`)
+### `textInputGeometryUpdate` (`messageType = 2004`)
 
-Sends text cursor rectangles for host IME/caret UI.
+Sends the active text input geometry used by host text input APIs, including IME candidate window placement. Content is responsible for rendering its own caret and selection UI.
 
-Closest macOS/API mirror: `NSTextInputClient.firstRect(forCharacterRange:actualRange:)` and caret rect tracking.
+Closest macOS/API mirror: `NSTextInputClient.firstRect(forCharacterRange:actualRange:)`.
 
 ```text
-bytes 2..5:           UInt32 cursor count, N
-bytes 6..<6+49*N:     N cursor records
-cursor record i, B = 6 + 49*i:
-  bytes B..B+15:      UUID fieldID
-  bytes B+16..B+23:   float64 rect.origin.x
-  bytes B+24..B+31:   float64 rect.origin.y
-  bytes B+32..B+39:   float64 rect.size.width
-  bytes B+40..B+47:   float64 rect.size.height
-  byte B+48:          UInt8 flags
-                      bit 0 = visible
+byte 2:        UInt8 flags
+               bit 0 = has geometry
+if bit 0 is set:
+  bytes 3..18:    UUID fieldID
+  bytes 19..26:   float64 rect.origin.x
+  bytes 27..34:   float64 rect.origin.y
+  bytes 35..42:   float64 rect.size.width
+  bytes 43..50:   float64 rect.size.height
 ```
 
-### `copySelectedPasteboardResponse` (`messageType = 2008`)
+### `selectionToPasteboardResponse` (`messageType = 2008`)
 
 Responds to a copy request with pasteboard items.
 
@@ -579,11 +741,130 @@ Closest macOS/API mirror: `NSPasteboard` and `NSPasteboardItem`.
 
 ```text
 bytes 2..17:             UUID requestID
-bytes 18..19:            UInt16 item count, N
-bytes 20..<20+16*N:      N pasteboard item records
-pasteboard item record i, B = 20 + 16*i:
+bytes 18..19:            UInt16 pasteboard item count, N
+then N pasteboard item records:
+  UInt16 representation count, R
+  then R representation records:
+    StringRef32 pasteboard type identifier
+    DataRef32 representation data
+```
+
+### `pasteboardAccessRequest` (`messageType = 2017`)
+
+Requests programmatic pasteboard access from the host. The host decides whether to grant the request. The current browser allows writes by default and shows confirmation UI before programmatic reads.
+
+This is intentionally distinct from host-originated edit commands. For example, a context-menu `standardCopy` item is handled by the browser and uses `selectionToPasteboardCopyRequest`, so the host can always allow that user-selected menu operation while still prompting or denying programmatic reads.
+
+```text
+bytes 2..17:             UUID requestID
+byte 18:                 UInt8 operation
+                         0 = read
+                         1 = write
+bytes 19..20:            UInt16 requested pasteboard type count, T
+bytes 21..22:            UInt16 item count, N
+bytes 23..<23+8*T:       T requested pasteboard type references
+pasteboard type reference i, B = 23 + 8*i:
   bytes B..B+7:          StringRef32 pasteboard type identifier
-  bytes B+8..B+15:       DataRef32 item data
+bytes 23+8*T..<...:      N pasteboard item records
+pasteboard item record:
+  UInt16 representation count, R
+  then R representation records:
+    StringRef32 pasteboard type identifier
+    DataRef32 representation data
+```
+
+### `beginDraggingPasteboardItems` (`messageType = 2018`)
+
+Requests that the host begin a native drag session using content-provided pasteboard items. The host owns the `NSDraggingSession` and writes native pasteboard representations, allowing content to offer files or other drag sources without direct pasteboard access.
+
+Closest macOS/API mirror: `NSDraggingSource`, `NSDraggingItem`, `NSPasteboardItem`, and `NSFilePromiseProvider`.
+
+```text
+bytes 2..5:              UInt32 NSDragOperation raw operation mask
+bytes 6..7:              UInt16 item count, N
+then N dragging item records:
+  UInt16 pasteboard representation count, R
+  then R representation records:
+    StringRef32 pasteboard type identifier
+    DataRef32 representation data
+  UInt8 flags
+                          bit 0 = has drag preview image
+                          bit 1 = has explicit drag preview frame origin
+  DataRef32 PNG drag preview image data, empty when absent
+  float64 drag preview width in source-view points, 0 when absent
+  float64 drag preview height in source-view points, 0 when absent
+  if bit 1 is set:
+    float64 drag preview frame minX in source-view points
+    float64 drag preview frame minY in source-view points
+```
+
+The drag preview fields affect only source-side drag UI. They are not written to `NSPasteboard` and are not transferable data. Content may provide higher-resolution PNG data than the logical point size for Retina rendering. When content provides an explicit preview frame origin, the host uses that source-view point as the initial drag image origin; otherwise the host places the preview near the drag start point.
+
+The host recognizes these outerframe private pasteboard type identifiers:
+
+```text
+org.outerframe.file-promise
+  Content-created binary metadata for a file that content can stage later if Finder requests it:
+    bytes 0..3:    UInt32 version, currently 1
+    bytes 4..7:    UInt32 flags, currently 0
+    bytes 8..23:   UUID content-owned file promise ID
+    bytes 24..31:  UInt64 file size, UInt64.max when absent
+    bytes 32..39:  StringRef32 promised file name
+    bytes 40..47:  StringRef32 file type identifier, empty when absent
+    bytes 48..<L:  variable-length region
+  The host exposes this as an NSFilePromiseProvider. If Finder requests the file, the host sends `filePromiseWriteRequest`; content stages the file and replies with `filePromiseWriteResponse`.
+
+org.outerframe.dropped-file-access
+  Host-created binary metadata for a dropped local file that has already been made readable to content under OUTERFRAME_STAGING_DIR.
+  This appears as a pasteboard representation inside `pasteboardContentDropped`; the bytes below are that representation's DataRef32 payload:
+    bytes 0..3:    UInt32 version, currently 1
+    bytes 4..7:    UInt32 flags
+                    bit 0 = is directory
+    bytes 8..23:   UUID dropped file access ID
+    bytes 24..31:  UInt64 file size, UInt64.max when absent
+    bytes 32..39:  StringRef32 file name
+    bytes 40..47:  StringRef32 file type identifier, empty when absent
+    bytes 48..55:  StringRef32 local staged file path
+    bytes 56..<L:  variable-length region
+  Content should call `releaseDroppedFileAccess` with the access ID when it no longer needs the file.
+```
+
+### `filePromiseWriteRequest` (`messageType = 1039`)
+
+Sent by the host to content when a native destination consumes an `org.outerframe.file-promise`.
+
+Closest macOS/API mirror: `NSFilePromiseProviderDelegate.filePromiseProvider(_:writePromiseTo:completionHandler:)`.
+
+```text
+bytes 2..17:   UUID requestID
+bytes 18..33:  UUID content-owned file promise ID
+```
+
+Content should write or download the promised file into `OUTERFRAME_STAGING_DIR`, then reply with `filePromiseWriteResponse`. The host copies the staged file into the native destination.
+
+### `filePromiseWriteResponse` (`messageType = 2027`)
+
+Responds to `filePromiseWriteRequest`.
+
+```text
+bytes 2..17:   UUID requestID
+bytes 18..33:  UUID content-owned file promise ID
+bytes 34:      UInt8 flags
+                bit 0 = success
+                bit 1 = delete staged file after a successful promise write
+bytes 35..42:  StringRef32 local staged file path, empty on failure
+bytes 43..50:  StringRef32 error message, empty on success
+bytes 51..<L:  variable-length region
+```
+
+Successful paths must be under `OUTERFRAME_STAGING_DIR`; the host validates this before copying. The response carries a local staged path, not the file bytes.
+
+### `releaseDroppedFileAccess` (`messageType = 2026`)
+
+Releases a dropped-file access lease previously delivered as `org.outerframe.dropped-file-access`. The host removes temporary staged files for that access ID. The host also releases all remaining access leases when the content process exits or disconnects.
+
+```text
+bytes 2..17:             UUID accessID
 ```
 
 ### `openNewWindow` (`messageType = 2012`)
@@ -602,25 +883,135 @@ bytes 19..26: float64 preferredSize.width, 0 when absent
 bytes 27..34: float64 preferredSize.height, 0 when absent
 ```
 
-### `setPasteboardCapabilities` (`messageType = 2009`)
+### `navigate` (`messageType = 2028`)
 
-Updates whether content can copy/cut and what pasteboard types it accepts.
+Requests that the host navigate the current browser tab to a URL.
 
-Closest macOS/API mirror: `NSPasteboard`, `validateUserInterfaceItem(_:)`, and edit-menu enablement.
+Closest macOS/API mirror: browser-style current-tab navigation, similar to `WKWebView.load(_:)`.
 
 ```text
-byte 2:             UInt8 flags
-                    bit 0 = canCopy
-                    bit 1 = canCut
-bytes 3..4:         UInt16 pasteboard type count, N
-bytes 5..<5+8*N:    N pasteboard type references
-pasteboard type reference i, B = 5 + 8*i:
-  bytes B..B+7:     StringRef32 pasteboard type identifier
+bytes 2..9: StringRef32 URL
 ```
+
+### `openNewTab` (`messageType = 2029`)
+
+Requests that the host open a new browser tab for a URL.
+
+Closest macOS/API mirror: browser-style new-tab handling. AppKit has no direct equivalent.
+
+```text
+bytes 2..9:   StringRef32 URL
+byte 10:      UInt8 flags
+              bit 0 = hasDisplayString
+bytes 11..18: StringRef32 displayString, empty when absent
+```
+
+### `setTitle` (`messageType = 2030`)
+
+Updates the host presentation title for the current outerframe content instance. Browser-like hosts may use this for tab titles, address-bar titles, window titles, or other chrome. Hosts where this metadata does not make sense may ignore it.
+
+Closest macOS/API mirror: document/window presentation metadata such as `NSWindow.title`.
+
+```text
+byte 2:      UInt8 flags
+             bit 0 = hasTitle
+bytes 3..10: StringRef32 title, empty when absent
+```
+
+When `hasTitle` is not set, the host clears the content-provided title and may fall back to bundle, URL, or host defaults.
+
+### `setIcon` (`messageType = 2031`)
+
+Updates the host presentation icon for the current outerframe content instance. Browser-like hosts may use this for tab icons, address-bar icons, or other chrome. Hosts where this metadata does not make sense may ignore it.
+
+Closest macOS/API mirror: document/window presentation metadata such as represented file icons, plus browser tab icons.
+
+```text
+byte 2:      UInt8 iconKind
+             0 = none
+             1 = bundleResource
+             2 = stagedFile
+bytes 3..10: StringRef32 iconPath, empty when iconKind = none
+```
+
+When `iconKind = none`, the host clears the content-provided icon and may fall back to bundle or host defaults.
+
+`bundleResource` paths are resolved relative to the loaded content bundle. `stagedFile` paths are resolved inside `OUTERFRAME_STAGING_DIR`; hosts may also accept absolute paths that still resolve inside that directory. Hosts must reject paths that resolve outside these already-authorized roots.
+
+### `editCommandValidationResponse` (`messageType = 2009`)
+
+Replies to `editCommandValidationRequest`.
+
+Closest macOS/API mirror: `validateUserInterfaceItem(_:)` and edit-menu enablement.
+
+```text
+bytes 2..17: UUID requestID
+bytes 18..21: UInt32 enabledCommands bitmask
+              bit 0 = copy
+              bit 1 = cut
+              bit 2 = paste
+              bit 3 = selectAll
+              bit 4 = find
+              bit 5 = findNext
+              bit 6 = findPrevious
+```
+
+### `setPasteboardDropBehaviorUniform` (`messageType = 2021`)
+
+Sets uniform whole-view drag-and-drop validation, and sets which pasteboard type identifiers the host may accept and serialize for drag-and-drop.
+
+Closest macOS/API mirror: `NSPasteboard.PasteboardType`.
+
+```text
+bytes 2..3:       UInt16 pasteboard type count, N
+bytes 4..<4+8*N:  N pasteboard type references
+pasteboard type reference i, B = 4 + 8*i:
+  bytes B..B+7:   StringRef32 pasteboard type identifier
+```
+
+An empty list disables drop acceptance. A non-empty list accepts drops across the whole outerframe view when the native pasteboard contains one of these types. This message exits hit-test behavior.
+
+### `setAcceptedPasteboardPasteTypes` (`messageType = 2022`)
+
+Sets which pasteboard type identifiers the host may accept and serialize for user-initiated paste.
+
+Closest macOS/API mirror: `NSPasteboard.PasteboardType`.
+
+```text
+bytes 2..3:       UInt16 pasteboard type count, N
+bytes 4..<4+8*N:  N pasteboard type references
+pasteboard type reference i, B = 4 + 8*i:
+  bytes B..B+7:   StringRef32 pasteboard type identifier
+```
+
+An empty list disables host-delivered paste. This does not affect drag-and-drop.
+
+### `pasteboardDropHitTestResponse` (`messageType = 2023`)
+
+Responds to `pasteboardDropHitTestRequest`.
+
+Closest macOS/API mirror: `NSDragOperation` returned by `NSDraggingDestination` validation.
+
+```text
+bytes 2..17:   UUID requestID
+bytes 18..21:  UInt32 accepted operation mask, 0 to reject
+```
+
+### `setPasteboardDropBehaviorHitTest` (`messageType = 2024`)
+
+Switches drag-and-drop validation to synchronous content hit-testing.
+
+Closest macOS/API mirror: `NSDraggingDestination` validation.
+
+```text
+No payload.
+```
+
+When the current drop type list is non-empty, the host validates the current drag location by sending `pasteboardDropHitTestRequest` and waiting briefly for `pasteboardDropHitTestResponse`. The hit-test request includes the native pasteboard types visible to the host; the configured drop type list is still used as the final serialization filter when the drop is delivered. Calling `setPasteboardDropBehaviorUniform` with an empty list disables drops.
 
 ### `accessibilitySnapshotResponse` (`messageType = 2010`)
 
-Responds with a serialized content-provided accessibility tree.
+Responds with a serialized content-provided accessibility tree. This is the synchronous reply to `accessibilitySnapshotRequest`; content must echo the request ID. Responses that arrive after the browser timeout may be ignored.
 
 Closest macOS/API mirror: `NSAccessibility`.
 
@@ -670,7 +1061,7 @@ Node record offsets must point within the snapshot data. String offsets must poi
 
 ### `accessibilityTreeChanged` (`messageType = 2011`)
 
-Requests that the host post accessibility change notifications.
+Requests that the host post accessibility change notifications. The browser clears any accessibility elements it built from the previous snapshot and posts the requested native notifications. The next host accessibility query causes a new synchronous `accessibilitySnapshotRequest`.
 
 Closest macOS/API mirror: `NSAccessibility.post(element:notification:)`.
 

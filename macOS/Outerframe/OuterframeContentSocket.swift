@@ -43,6 +43,7 @@ actor OuterframeContentSocket {
     private var incomingBuffer = Data()
 
     nonisolated(unsafe) weak var delegate: (any OuterframeContentSocketDelegate)?
+    nonisolated(unsafe) var immediateMessageHandler: (@Sendable (Data) -> Bool)?
 
     private func configureSocketOptions(_ fd: Int32) {
         var one: Int32 = 1
@@ -52,8 +53,9 @@ actor OuterframeContentSocket {
         }
     }
 
-    init() {
-        queue = DispatchQueue(label: "dev.outergroup.outerframecontent.socket.browser") as! DispatchSerialQueue
+    init(label: String = "org.outerframe.outerframecontent.socket.browser",
+         qos: DispatchQoS = .userInitiated) {
+        queue = DispatchQueue(label: label, qos: qos) as! DispatchSerialQueue
     }
 
     func start(withFileDescriptor fd: Int32) {
@@ -91,6 +93,7 @@ actor OuterframeContentSocket {
     func stop() {
         cleanupConnection()
         delegate = nil
+        immediateMessageHandler = nil
     }
 
     func setDelegate(_ delegate: (any OuterframeContentSocketDelegate)?) {
@@ -103,6 +106,22 @@ actor OuterframeContentSocket {
         }
 
         enqueueWrite(data)
+    }
+
+    nonisolated func sendBlocking(_ data: Data) throws {
+        guard !data.isEmpty else { return }
+        var result: Result<Void, Error> = .success(())
+        queue.sync {
+            assumeIsolatedHack { actor in
+                do {
+                    try actor.writeImmediatelyOrEnqueue(data)
+                    result = .success(())
+                } catch {
+                    result = .failure(error)
+                }
+            }
+        }
+        try result.get()
     }
 
     private func handleReadable() {
@@ -162,6 +181,44 @@ actor OuterframeContentSocket {
         writeSource?.safeResume()
     }
 
+    private func writeImmediatelyOrEnqueue(_ data: Data) throws {
+        guard socketFD >= 0 else {
+            throw OuterframeContentSocketError.disconnected
+        }
+
+        guard pendingWriteBuffer.isEmpty else {
+            pendingWriteBuffer.append(data)
+            writeSource?.safeResume()
+            return
+        }
+
+        let written = data.withUnsafeBytes { buffer -> Int in
+            guard let baseAddress = buffer.baseAddress else { return 0 }
+            return write(socketFD, baseAddress, buffer.count)
+        }
+
+        if written == data.count {
+            return
+        }
+
+        if written > 0 {
+            pendingWriteBuffer.append(data.subdata(in: written..<data.count))
+            writeSource?.safeResume()
+            return
+        }
+
+        if written == -1 && (errno == EWOULDBLOCK || errno == EAGAIN) {
+            pendingWriteBuffer.append(data)
+            writeSource?.safeResume()
+            return
+        }
+
+        let code = errno
+        cleanupConnection()
+        notifyClosed()
+        throw OuterframeContentSocketError.writeFailed(code)
+    }
+
     private func cleanupConnection() {
         readSource?.cancel()
         readSource = nil
@@ -177,7 +234,9 @@ actor OuterframeContentSocket {
 
     private func notifyClosed() {
         if let delegate {
-            Task { await delegate.outerframeContentSocketDidClose(self) }
+            Task(priority: .high) {
+                await delegate.outerframeContentSocketDidClose(self)
+            }
         }
     }
 
@@ -198,8 +257,14 @@ actor OuterframeContentSocket {
 
             incomingBuffer.removeSubrange(incomingBuffer.startIndex..<messageEnd)
 
+            if let immediateMessageHandler, immediateMessageHandler(message) {
+                continue
+            }
+
             if let delegate {
-                Task { await delegate.outerframeContentSocket(self, didReceiveMessage: message) }
+                Task(priority: .high) {
+                    await delegate.outerframeContentSocket(self, didReceiveMessage: message)
+                }
             }
         }
     }
@@ -207,4 +272,5 @@ actor OuterframeContentSocket {
 
 enum OuterframeContentSocketError: Error {
     case disconnected
+    case writeFailed(Int32)
 }

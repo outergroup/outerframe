@@ -66,8 +66,8 @@ final class OpenNetworkProxy: NSObject, OpenNetworkProxyProtocol {
 }
 
 final class OpenNetworkProxyController {
-    private let listenerQueue = DispatchQueue(label: "dev.outergroup.outerframe.networkproxy.listener")
-    private let stateQueue = DispatchQueue(label: "dev.outergroup.outerframe.networkproxy.state", attributes: .concurrent)
+    private let listenerQueue = DispatchQueue(label: "org.outerframe.outerframe.networkproxy.listener")
+    private let stateQueue = DispatchQueue(label: "org.outerframe.outerframe.networkproxy.state", attributes: .concurrent)
 
     private var listener: NWListener?
     private var listeningPort: UInt16?
@@ -287,7 +287,7 @@ final class OpenNetworkProxyController {
 private final class ProxyPipeline {
     private let client: NWConnection
     private let controller: OpenNetworkProxyController
-    private let queue = DispatchQueue(label: "dev.outergroup.outerframe.networkproxy.connection", qos: .userInitiated)
+    private let queue = DispatchQueue(label: "org.outerframe.outerframe.networkproxy.connection", qos: .userInitiated)
 
     private var server: NWConnection?
     private var pendingClientBuffer = Data()

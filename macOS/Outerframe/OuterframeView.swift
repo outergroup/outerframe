@@ -1,5 +1,7 @@
 import AppKit
+import Darwin
 import Network
+import UniformTypeIdentifiers
 
 enum OuterframeHostIdentityError: LocalizedError {
     case missingBundleIdentifier
@@ -31,6 +33,16 @@ public struct OuterframeCacheContext {
         self.serverID = serverID
         self.host = host
         self.port = port
+    }
+}
+
+public struct OuterframeStorageContext {
+    public let serverTemporaryDirectoryURL: URL
+    public let originIdentifier: String
+
+    public init(serverTemporaryDirectoryURL: URL, originIdentifier: String) {
+        self.serverTemporaryDirectoryURL = serverTemporaryDirectoryURL
+        self.originIdentifier = originIdentifier
     }
 }
 
@@ -246,14 +258,10 @@ private enum OuterframeBundleCache {
 
     private static func fallbackBaseDirectoryPath() throws -> URL {
         let bundleIdentifier = try OuterframeHostIdentity.bundleIdentifier()
-        let libraryDirectory = FileManager.default.urls(for: .libraryDirectory,
-                                                        in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
-                .appendingPathComponent("Library", isDirectory: true)
-
-        return libraryDirectory
+        return URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Caches", isDirectory: true)
             .appendingPathComponent(bundleIdentifier, isDirectory: true)
-            .appendingPathComponent("Cache", isDirectory: true)
             .appendingPathComponent("OuterframeBundleCache", isDirectory: true)
     }
 
@@ -338,8 +346,463 @@ public enum OuterframeCacheManager {
     }
 }
 
+private final class PluginContextMenuAction: NSObject {
+    let menuID: UUID
+    let itemID: String
+
+    init(menuID: UUID, itemID: String) {
+        self.menuID = menuID
+        self.itemID = itemID
+    }
+}
+
+private final class PluginContextMenuLabelView: NSView {
+    private let label: NSTextField
+
+    init(title: String, style: OuterframeContextMenuItemStyle) {
+        label = NSTextField(labelWithString: title)
+        let height = CGFloat(style.height > 0 ? style.height : 23)
+        super.init(frame: NSRect(x: 0, y: 0, width: 220, height: height))
+        wantsLayer = true
+        let fontSize = CGFloat(style.fontSize > 0 ? style.fontSize : 11)
+        let fontWeight = style.fontWeight != 0 ? NSFont.Weight(rawValue: CGFloat(style.fontWeight)) : .semibold
+        label.font = NSFont.systemFont(ofSize: fontSize, weight: fontWeight)
+        label.textColor = NSColor(outerframeMenuRGBA: style.textColorRGBA) ?? .secondaryLabelColor
+        label.lineBreakMode = .byTruncatingTail
+        switch style.alignment {
+        case .natural:
+            label.alignment = .natural
+        case .left:
+            label.alignment = .left
+        case .center:
+            label.alignment = .center
+        case .right:
+            label.alignment = .right
+        }
+        let leftInset = CGFloat(style.leftInset)
+        let rightInset = CGFloat(style.rightInset)
+        let topInset = CGFloat(style.topInset)
+        let bottomInset = CGFloat(style.bottomInset)
+        label.frame = NSRect(x: leftInset,
+                             y: bottomInset,
+                             width: max(0, 220 - leftInset - rightInset),
+                             height: max(0, height - topInset - bottomInset))
+        label.autoresizingMask = [.width]
+        addSubview(label)
+    }
+
+    required init?(coder: NSCoder) {
+        return nil
+    }
+}
+
+private extension NSColor {
+    convenience init?(outerframeMenuRGBA rgba: UInt32) {
+        guard rgba != 0 else { return nil }
+        let red = CGFloat((rgba >> 24) & 0xff) / 255
+        let green = CGFloat((rgba >> 16) & 0xff) / 255
+        let blue = CGFloat((rgba >> 8) & 0xff) / 255
+        let alpha = CGFloat(rgba & 0xff) / 255
+        self.init(red: red, green: green, blue: blue, alpha: alpha)
+    }
+}
+
+private struct OuterframeFilePromisePayload {
+    let id: UUID
+    let name: String
+    let fileSize: UInt64?
+    let fileType: String?
+}
+
+private struct OuterframeDroppedFileAccessPayload: Sendable {
+    let id: UUID
+    let name: String
+    let localPath: String
+    let fileSize: UInt64?
+    let fileType: String?
+    let isDirectory: Bool
+}
+
+private struct OuterframeDroppedFileAccess: Sendable {
+    let id: UUID
+    let stagedURL: URL
+    let cleanupURL: URL
+}
+
+private enum OuterframePasteboardPayload {
+    private static let version: UInt32 = 1
+    private static let droppedFileAccessMissingSize = UInt64.max
+    private static let droppedFileAccessDirectoryFlag: UInt32 = 1 << 0
+    private static let filePromiseMissingSize = UInt64.max
+
+    static func decodeFilePromise(_ data: Data) -> OuterframeFilePromisePayload? {
+        var cursor = BinaryPayloadCursor(data)
+        guard cursor.readUInt32() == version,
+              cursor.readUInt32() != nil,
+              let id = cursor.readUUID(),
+              let encodedFileSize = cursor.readUInt64(),
+              let name = cursor.readStringReference(),
+              !name.isEmpty,
+              let fileType = cursor.readStringReference() else {
+            return nil
+        }
+
+        return OuterframeFilePromisePayload(id: id,
+                                            name: name,
+                                            fileSize: encodedFileSize == filePromiseMissingSize ? nil : encodedFileSize,
+                                            fileType: fileType.isEmpty ? nil : fileType)
+    }
+
+    static func encodeDroppedFileAccess(_ payload: OuterframeDroppedFileAccessPayload) -> Data? {
+        var builder = BinaryPayloadBuilder(referenceBaseOffset: 0)
+        builder.append(uint32: version)
+        builder.append(uint32: payload.isDirectory ? droppedFileAccessDirectoryFlag : 0)
+        builder.append(uuid: payload.id)
+        builder.append(uint64: payload.fileSize ?? droppedFileAccessMissingSize)
+        guard builder.append(stringReference: payload.name),
+              builder.append(stringReference: payload.fileType ?? ""),
+              builder.append(stringReference: payload.localPath) else {
+            return nil
+        }
+        return builder.finalize()
+    }
+}
+
+private struct BinaryPayloadBuilder {
+    private struct Reference {
+        let patchOffset: Int
+        let variableOffset: Int
+        let length: Int
+    }
+
+    private var fixed = Data()
+    private var variable = Data()
+    private var references: [Reference] = []
+    private let referenceBaseOffset: Int
+
+    init(referenceBaseOffset: Int) {
+        self.referenceBaseOffset = referenceBaseOffset
+    }
+
+    mutating func append(uint32 value: UInt32) {
+        fixed.appendLittleEndian(value)
+    }
+
+    mutating func append(uint64 value: UInt64) {
+        fixed.appendLittleEndian(value)
+    }
+
+    mutating func append(uuid value: UUID) {
+        fixed.append(uuid: value)
+    }
+
+    mutating func append(stringReference string: String) -> Bool {
+        guard let data = string.data(using: .utf8),
+              data.count <= Int(UInt32.max) else {
+            return false
+        }
+        let patchOffset = fixed.count
+        fixed.appendLittleEndian(UInt32(0))
+        fixed.appendLittleEndian(UInt32(data.count))
+        references.append(Reference(patchOffset: patchOffset,
+                                    variableOffset: variable.count,
+                                    length: data.count))
+        variable.append(data)
+        return true
+    }
+
+    mutating func finalize() -> Data? {
+        guard fixed.count <= Int(UInt32.max),
+              variable.count <= Int(UInt32.max),
+              variable.count <= Int(UInt32.max) - fixed.count else {
+            return nil
+        }
+
+        for reference in references {
+            let offset = referenceBaseOffset + fixed.count + reference.variableOffset
+            guard offset <= Int(UInt32.max),
+                  reference.length <= Int(UInt32.max) else {
+                return nil
+            }
+            fixed.replaceLittleEndianUInt32(at: reference.patchOffset, with: UInt32(offset))
+            fixed.replaceLittleEndianUInt32(at: reference.patchOffset + 4, with: UInt32(reference.length))
+        }
+
+        var payload = Data(capacity: fixed.count + variable.count)
+        payload.append(fixed)
+        payload.append(variable)
+        return payload
+    }
+}
+
+private struct BinaryPayloadCursor {
+    private let data: Data
+    private var offset = 0
+
+    init(_ data: Data) {
+        self.data = data
+    }
+
+    mutating func readUInt32() -> UInt32? {
+        guard offset + 4 <= data.count else { return nil }
+        var value: UInt32 = 0
+        for index in 0..<4 {
+            value |= UInt32(data[offset + index]) << UInt32(index * 8)
+        }
+        offset += 4
+        return value
+    }
+
+    mutating func readUInt64() -> UInt64? {
+        guard offset + 8 <= data.count else { return nil }
+        var value: UInt64 = 0
+        for index in 0..<8 {
+            value |= UInt64(data[offset + index]) << UInt64(index * 8)
+        }
+        offset += 8
+        return value
+    }
+
+    mutating func readUUID() -> UUID? {
+        guard offset + 16 <= data.count else { return nil }
+        let bytes = Array(data[offset..<(offset + 16)])
+        offset += 16
+        return UUID(uuid: (
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11],
+            bytes[12], bytes[13], bytes[14], bytes[15]
+        ))
+    }
+
+    mutating func readStringReference() -> String? {
+        guard let data = readDataReference() else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private mutating func readDataReference() -> Data? {
+        guard let offsetValue = readUInt32(),
+              let lengthValue = readUInt32() else {
+            return nil
+        }
+
+        let start = Int(offsetValue)
+        let length = Int(lengthValue)
+        guard start <= data.count,
+              length <= data.count - start else {
+            return nil
+        }
+        return data.subdata(in: start..<(start + length))
+    }
+}
+
+private extension Data {
+    mutating func appendLittleEndian(_ value: UInt32) {
+        var value = value.littleEndian
+        Swift.withUnsafeBytes(of: &value) { append(contentsOf: $0) }
+    }
+
+    mutating func appendLittleEndian(_ value: UInt64) {
+        var value = value.littleEndian
+        Swift.withUnsafeBytes(of: &value) { append(contentsOf: $0) }
+    }
+
+    mutating func append(uuid value: UUID) {
+        var uuidValue = value.uuid
+        Swift.withUnsafeBytes(of: &uuidValue) { append(contentsOf: $0) }
+    }
+
+    mutating func replaceLittleEndianUInt32(at offset: Int, with value: UInt32) {
+        var value = value.littleEndian
+        Swift.withUnsafeBytes(of: &value) {
+            replaceSubrange(offset..<(offset + 4), with: $0)
+        }
+    }
+}
+
+private func copyPromisedFileContents(from sourceURL: URL, to targetURL: URL) throws {
+    let fileManager = FileManager.default
+    let sourceValues = try sourceURL.resourceValues(forKeys: [.isDirectoryKey])
+    var isDirectory: ObjCBool = false
+    if fileManager.fileExists(atPath: targetURL.path, isDirectory: &isDirectory) {
+        if sourceValues.isDirectory == true || isDirectory.boolValue {
+            throw NSError(domain: NSCocoaErrorDomain,
+                          code: NSFileWriteFileExistsError,
+                          userInfo: [NSLocalizedDescriptionKey: "Destination already exists: \(targetURL.path)"])
+        }
+        try fileManager.removeItem(at: targetURL)
+    }
+
+    if sourceValues.isDirectory == true {
+        try fileManager.copyItem(at: sourceURL, to: targetURL)
+        return
+    }
+
+    try copyPromisedFileBytes(from: sourceURL, to: targetURL)
+}
+
+private func copyPromisedFileBytes(from sourceURL: URL, to targetURL: URL) throws {
+    let input = try FileHandle(forReadingFrom: sourceURL)
+    defer { try? input.close() }
+
+    guard FileManager.default.createFile(atPath: targetURL.path, contents: nil) else {
+        throw NSError(domain: NSCocoaErrorDomain,
+                      code: NSFileWriteUnknownError,
+                      userInfo: [NSLocalizedDescriptionKey: "Could not create promised file at \(targetURL.path)"])
+    }
+
+    let output = try FileHandle(forWritingTo: targetURL)
+    defer { try? output.close() }
+
+    do {
+        while let chunk = try input.read(upToCount: 1024 * 1024),
+              !chunk.isEmpty {
+            try output.write(contentsOf: chunk)
+        }
+    } catch {
+        try? FileManager.default.removeItem(at: targetURL)
+        throw error
+    }
+}
+
+private final class OuterframeFilePromiseWriter: NSObject, NSFilePromiseProviderDelegate, @unchecked Sendable {
+    let promiseID: UUID
+    let fileName: String
+    var completion: ((OuterframeFilePromiseWriter) -> Void)?
+    private let allowedStagingDirectoryURL: URL?
+    private let requestStagedFile: @Sendable (UUID, @escaping @Sendable (Result<OuterframeFilePromiseWriteResult, Error>) -> Void) -> Void
+    private let filePromiseQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.name = "org.outerframe.file-promise"
+        queue.maxConcurrentOperationCount = 2
+        return queue
+    }()
+
+    init(promiseID: UUID,
+         fileName: String,
+         allowedStagingDirectoryURL: URL?,
+         requestStagedFile: @escaping @Sendable (UUID, @escaping @Sendable (Result<OuterframeFilePromiseWriteResult, Error>) -> Void) -> Void) {
+        self.promiseID = promiseID
+        self.fileName = Self.safePromisedFileName(fileName)
+        self.allowedStagingDirectoryURL = allowedStagingDirectoryURL
+        self.requestStagedFile = requestStagedFile
+    }
+
+    nonisolated func filePromiseProvider(_ filePromiseProvider: NSFilePromiseProvider,
+                                         fileNameForType fileType: String) -> String {
+        return fileName
+    }
+
+    nonisolated func operationQueue(for filePromiseProvider: NSFilePromiseProvider) -> OperationQueue {
+        filePromiseQueue
+    }
+
+    nonisolated func filePromiseProvider(_ filePromiseProvider: NSFilePromiseProvider,
+                                         writePromiseTo url: URL,
+                                         completionHandler: @escaping @Sendable (Error?) -> Void) {
+        let targetURL = targetURL(forPromisedURL: url)
+
+        requestStagedFile(promiseID) { [weak self] result in
+            guard let self else { return }
+            defer {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.completion?(self)
+                }
+            }
+
+            do {
+                let writeResult = try result.get()
+                try self.copyWriteResult(writeResult, to: targetURL)
+                completionHandler(nil)
+            } catch {
+                NSLog("Outerframe file promise: write failed for '%@' to %@: %@",
+                      self.fileName,
+                      targetURL.path,
+                      String(describing: error))
+                completionHandler(error)
+            }
+        }
+    }
+
+    private func copyWriteResult(_ writeResult: OuterframeFilePromiseWriteResult, to targetURL: URL) throws {
+        guard writeResult.promiseID == promiseID else {
+            throw NSError(domain: NSCocoaErrorDomain,
+                          code: NSFileWriteUnknownError,
+                          userInfo: [NSLocalizedDescriptionKey: "Content responded with the wrong file promise ID."])
+        }
+        let stagedURL = try validatedStagedFileURL(for: writeResult)
+        try copyPromisedFileContents(from: stagedURL, to: targetURL)
+        if writeResult.deleteWhenDone {
+            try? FileManager.default.removeItem(at: stagedURL)
+        }
+    }
+
+    private func targetURL(forPromisedURL url: URL) -> URL {
+        let fileManager = FileManager.default
+        var isDirectory: ObjCBool = false
+        if fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory),
+           isDirectory.boolValue {
+            return url.appendingPathComponent(fileName)
+        }
+
+        if url.hasDirectoryPath {
+            return url.appendingPathComponent(fileName)
+        }
+
+        if let values = try? url.resourceValues(forKeys: [.isDirectoryKey]),
+           values.isDirectory == true {
+            return url.appendingPathComponent(fileName)
+        }
+
+        return url
+    }
+
+    private func validatedStagedFileURL(for writeResult: OuterframeFilePromiseWriteResult) throws -> URL {
+        let stagedURL = URL(fileURLWithPath: writeResult.localPath)
+        guard stagedURL.isFileURL else {
+            throw NSError(domain: NSCocoaErrorDomain,
+                          code: NSFileReadUnsupportedSchemeError,
+                          userInfo: [NSLocalizedDescriptionKey: "Promised file staging URL is not a file URL."])
+        }
+        if let allowedStagingDirectoryURL {
+            let stagedPath = stagedURL.standardizedFileURL.path
+            let allowedPath = allowedStagingDirectoryURL.standardizedFileURL.path
+            guard stagedPath == allowedPath || stagedPath.hasPrefix(allowedPath + "/") else {
+                throw NSError(domain: NSCocoaErrorDomain,
+                              code: NSFileReadNoPermissionError,
+                              userInfo: [NSLocalizedDescriptionKey: "Promised file was staged outside OUTERFRAME_STAGING_DIR."])
+            }
+        }
+        let values = try stagedURL.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey])
+        guard values.isRegularFile == true || values.isDirectory == true else {
+            throw NSError(domain: NSCocoaErrorDomain,
+                          code: NSFileReadNoSuchFileError,
+                          userInfo: [NSLocalizedDescriptionKey: "Promised staged item is not a regular file or directory."])
+        }
+        return stagedURL
+    }
+
+    private static func safePromisedFileName(_ name: String) -> String {
+        var sanitized = name
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: ":", with: "_")
+            .replacingOccurrences(of: "\0", with: "")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        sanitized = URL(fileURLWithPath: sanitized).lastPathComponent
+
+        if sanitized.isEmpty || sanitized == "." || sanitized == ".." {
+            return "Untitled"
+        }
+        return sanitized
+    }
+}
+
 @MainActor
-public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuRequestor, NSTextInputClient {
+public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuRequestor, NSTextInputClient, NSDraggingSource {
     public weak var delegate: OuterframeViewDelegate?
 
     private var layerHost: CALayerHost?
@@ -348,6 +811,12 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
     private var currentSelectedAttributedText: NSAttributedString?
     private var rightClickLocation: NSPoint = .zero
     private var backgroundEffectView: NSVisualEffectView?
+    private var lastMouseDownEvent: NSEvent?
+    private var lastMouseDraggedEvent: NSEvent?
+    private var activeFilePromiseWriters: [AnyObject] = []
+    private var activePasteboardFilePromiseProviders: [AnyObject] = []
+    private var droppedFileAccesses: [UUID: OuterframeDroppedFileAccess] = [:]
+    private var currentDraggingOperationMask: NSDragOperation = .copy
 
     // Current loaded plugin
     private var pluginIsReady = false
@@ -361,9 +830,10 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
     private var debuggerAttachedForCurrentConnection = false
     private var hasExternalConnectionReady = false
     private var localBundleOverridePath: String?
+    private var presentationBundleURL: URL?
+    private var presentationStagingDirectoryURL: URL?
     private var debugModeObserver: NSObjectProtocol?
     private var autoResumeObserver: NSObjectProtocol?
-    private var accessibilityDisplayOptionsObserver: NSObjectProtocol?
 
     // Track active display link callbacks
     private var activeDisplayLinkCallbacks = [UUID: Bool]() // UUID -> isActive
@@ -376,57 +846,69 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
 
     var currentInputMode: OuterframeContentInputMode = .rawKeys
 
-    public static let outerframeMimeType = "application/vnd.outerframe"
-    public static let topLevelNavigationCapabilityHeaderField = "Outerframe-Accept"
-    public static let topLevelNavigationCapabilityHeaderValue = OuterframeView.outerframeMimeType
+    public nonisolated static let outerframeMimeType = "application/vnd.outerframe"
+    public nonisolated static let filePromisePasteboardTypeIdentifier = "org.outerframe.file-promise"
+    public nonisolated static let droppedFileAccessPasteboardTypeIdentifier = "org.outerframe.dropped-file-access"
+    public nonisolated static let topLevelNavigationCapabilityHeaderField = "Outerframe-Accept"
+    public nonisolated static let topLevelNavigationCapabilityHeaderValue = OuterframeView.outerframeMimeType
 
-    private nonisolated(unsafe) static let outerframeProcessesConnection: NSXPCConnection = {
+    private nonisolated static let outerframeProcessesConnectionLock = NSLock()
+    private nonisolated(unsafe) static var outerframeProcessesConnectionStorage: NSXPCConnection?
+
+    private nonisolated(unsafe) static var outerframeProcessesConnection: NSXPCConnection {
+        outerframeProcessesConnectionLock.lock()
+        defer { outerframeProcessesConnectionLock.unlock() }
+
+        if let outerframeProcessesConnectionStorage {
+            return outerframeProcessesConnectionStorage
+        }
+
+        let connection = makeOuterframeProcessesConnection()
+        outerframeProcessesConnectionStorage = connection
+        return connection
+    }
+
+    private nonisolated static func makeOuterframeProcessesConnection() -> NSXPCConnection {
         let connection = NSXPCConnection(serviceName: OuterframeConfiguration.processesXPCServiceName)
         connection.remoteObjectInterface = NSXPCInterface(with: OuterframeProcessesProtocol.self)
+        connection.interruptionHandler = {
+            NSLog("OuterframeView: OuterframeProcesses XPC connection interrupted")
+        }
+        connection.invalidationHandler = {
+            NSLog("OuterframeView: OuterframeProcesses XPC connection invalidated")
+            outerframeProcessesConnectionLock.lock()
+            if outerframeProcessesConnectionStorage === connection {
+                outerframeProcessesConnectionStorage = nil
+            }
+            outerframeProcessesConnectionLock.unlock()
+        }
         connection.resume()
         return connection
-    }()
+    }
 
     // Text input state
-    private var currentTextFieldID: UUID?
     private var currentText: String = ""
     private var textSelectedRange: NSRange = NSRange(location: 0, length: 0)
     private var markedText: NSAttributedString?
     private var textMarkedRange: NSRange = NSRange(location: NSNotFound, length: 0)
-
-    // Text cursor indicators
-    private var textCursorIndicators: [UUID: NSTextInsertionIndicator] = [:]
+    private var currentTextInputGeometry: OuterframeContentTextInputGeometry?
     private var overlayScrollIndicators: [String: NSScroller] = [:]
 
     private let manualMagnificationSurfaceId = Int(UInt32.max)
 
-    // Accessibility caching
-    private static let accessibilityActiveInterval: TimeInterval = 30
-    private var accessibilitySnapshot: OuterframeAccessibilitySnapshot?
+    private static let accessibilitySnapshotTimeoutMilliseconds: UInt32 = 250
     private var accessibilityElements: [OuterframeAccessibilityElement] = []
-    private var accessibilityRequestInFlight = false
-    private var accessibilitySnapshotIsStale = false
-    private var lastAccessibilityQueryUptime: TimeInterval?
-    private var cachedVoiceOverEnabled = false
-    private var pendingAccessibilityNotifications: OuterframeAccessibilityNotification = []
-    private var needsInitialAccessibilityAnnouncement = true
 
-    private struct EditingCapabilities {
-        let canCopy: Bool
-        let canCut: Bool
-        let acceptablePasteboardTypes: Set<NSPasteboard.PasteboardType>
+    private var acceptedPasteboardPasteTypes: [NSPasteboard.PasteboardType] = []
+    private var acceptedPasteboardDropTypes: [NSPasteboard.PasteboardType] = []
+    private var pasteboardDropHitTestEnabled = false
+    private var editCommandValidationSnapshot: EditCommandValidationSnapshot?
+    private static let editCommandValidationTimeoutMilliseconds: UInt32 = 25
+    private static let pasteboardDropHitTestTimeoutMilliseconds: UInt32 = 5
 
-        func allowsPaste(from pasteboard: NSPasteboard) -> Bool {
-            guard !acceptablePasteboardTypes.isEmpty else { return false }
-            guard let availableTypes = pasteboard.types, !availableTypes.isEmpty else { return false }
-            for type in availableTypes where acceptablePasteboardTypes.contains(type) {
-                return true
-            }
-            return false
-        }
+    private struct EditCommandValidationSnapshot {
+        let enabledCommands: OuterframeEditCommandSet?
     }
-
-    private var editingCapabilitiesOverride: EditingCapabilities?
 
     private func setOuterframeContentConnection(_ connection: OuterframeContentConnection?) {
         if outerframeContentConnection === connection {
@@ -459,8 +941,14 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
     private func commonInit() {
         wantsLayer = true
         installMaterialBackgroundIfNeeded()
+        registerForDraggedTypes([
+            .fileURL,
+            .URL,
+            .string,
+            NSPasteboard.PasteboardType(OuterframeView.filePromisePasteboardTypeIdentifier),
+            NSPasteboard.PasteboardType(OuterframeView.droppedFileAccessPasteboardTypeIdentifier)
+        ])
         updateTrackingAreas()
-        cachedVoiceOverEnabled = NSWorkspace.shared.isVoiceOverEnabled
 
         if debugModeObserver == nil {
             debugModeObserver = NotificationCenter.default.addObserver(forName: OuterframeDebugSettings.debugModeDidChangeNotification,
@@ -482,15 +970,6 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
             }
         }
 
-        if accessibilityDisplayOptionsObserver == nil {
-            accessibilityDisplayOptionsObserver = NotificationCenter.default.addObserver(forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
-                                                                                         object: nil,
-                                                                                         queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated {
-                    self?.cachedVoiceOverEnabled = NSWorkspace.shared.isVoiceOverEnabled
-                }
-            }
-        }
     }
 
     private func handleDebugModePreferenceChange() {
@@ -512,10 +991,6 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
     public override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         outerframeContentConnection?.sendSystemAppearanceUpdate(force: false)
-        for indicator in textCursorIndicators.values {
-            indicator.color = .controlAccentColor
-            indicator.layer?.zPosition = 2
-        }
     }
 
     public override var isOpaque: Bool {
@@ -531,9 +1006,6 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
                 NotificationCenter.default.removeObserver(observer)
             }
             if let observer = autoResumeObserver {
-                NotificationCenter.default.removeObserver(observer)
-            }
-            if let observer = accessibilityDisplayOptionsObserver {
                 NotificationCenter.default.removeObserver(observer)
             }
             cancelPendingDebugLoadIfNeeded(error: OuterframeContentConnectionError.disconnected)
@@ -613,55 +1085,10 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
         return result
     }
 
-    // MARK: - Text Cursor Management
+    // MARK: - Text Input Geometry
 
-    func updateTextCursors(_ cursors: [OuterframeContentTextCursorSnapshot]) {
-        var newFieldIDs = Set<UUID>()
-        var firstVisibleFieldID: UUID?
-        for cursor in cursors {
-            newFieldIDs.insert(cursor.fieldID)
-        }
-
-        for (fieldID, indicator) in textCursorIndicators {
-            if !newFieldIDs.contains(fieldID) {
-                indicator.removeFromSuperview()
-                textCursorIndicators.removeValue(forKey: fieldID)
-            }
-        }
-
-        for cursor in cursors {
-            let fieldID = cursor.fieldID
-            let x = cursor.rect.origin.x
-            let y = cursor.rect.origin.y
-            let width = cursor.rect.size.width
-            let height = cursor.rect.size.height
-            let visible = cursor.visible
-
-            let indicator: NSTextInsertionIndicator
-            if let existingIndicator = textCursorIndicators[fieldID] {
-                indicator = existingIndicator
-            } else {
-                indicator = NSTextInsertionIndicator(frame: NSRect(x: x, y: y, width: width, height: height))
-                indicator.displayMode = .automatic
-                indicator.color = .controlAccentColor
-                indicator.wantsLayer = true
-                indicator.layer?.zPosition = 2
-                addSubview(indicator)
-                textCursorIndicators[fieldID] = indicator
-            }
-
-            let backingScaleFactor = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
-            let renderedX = (x * backingScaleFactor).rounded(.down) / backingScaleFactor
-            let renderedWidth = (width * backingScaleFactor).rounded(.up) / backingScaleFactor
-            let flippedY = bounds.height - y - height
-            indicator.frame = NSRect(x: renderedX, y: flippedY, width: renderedWidth, height: height)
-            indicator.isHidden = !visible
-            if visible && firstVisibleFieldID == nil {
-                firstVisibleFieldID = fieldID
-            }
-        }
-
-        currentTextFieldID = firstVisibleFieldID
+    func updateTextInputGeometry(_ geometry: OuterframeContentTextInputGeometry?) {
+        currentTextInputGeometry = geometry
         inputContext?.invalidateCharacterCoordinates()
     }
 
@@ -750,17 +1177,14 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
         return MainActor.assumeIsolated {
             actualRange2?.pointee = range
 
-            // Use the cursor indicator position if available
             var viewRect: NSRect
-            if let fieldID = currentTextFieldID,
-               let indicator = textCursorIndicators[fieldID],
-               !indicator.isHidden {
-                // Position IME just above the cursor indicator
-                viewRect = indicator.frame
-            } else if let firstVisibleIndicator = textCursorIndicators.values.first(where: { !$0.isHidden }) {
-                viewRect = firstVisibleIndicator.frame
+            if let geometry = currentTextInputGeometry {
+                let rect = geometry.rect
+                viewRect = NSRect(x: rect.origin.x,
+                                  y: bounds.height - rect.origin.y - rect.size.height,
+                                  width: rect.size.width,
+                                  height: rect.size.height)
             } else {
-                // Fallback to a default position
                 viewRect = NSRect(x: 20, y: self.bounds.height - 30, width: 2, height: 20)
             }
 
@@ -780,120 +1204,202 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
         }
     }
 
-    public func setPasteboardCapabilities(canCopy: Bool,
-                                          canCut: Bool,
-                                          pasteboardTypeIdentifiers: [String]) {
-        let convertedTypes = pasteboardTypeIdentifiers
+    public func setPasteboardDropBehaviorUniform(_ pasteboardTypeIdentifiers: [String]) {
+        acceptedPasteboardDropTypes = pasteboardTypeIdentifiers
             .filter { !$0.isEmpty }
             .map { NSPasteboard.PasteboardType($0) }
-        editingCapabilitiesOverride = EditingCapabilities(canCopy: canCopy,
-                                                          canCut: canCut,
-                                                          acceptablePasteboardTypes: Set(convertedTypes))
+        pasteboardDropHitTestEnabled = false
     }
 
-    func resetEditingCapabilities() {
-        editingCapabilitiesOverride = nil
+    public func setAcceptedPasteboardPasteTypes(_ pasteboardTypeIdentifiers: [String]) {
+        acceptedPasteboardPasteTypes = pasteboardTypeIdentifiers
+            .filter { !$0.isEmpty }
+            .map { NSPasteboard.PasteboardType($0) }
+    }
+
+    public func setPasteboardDropBehaviorHitTest() {
+        pasteboardDropHitTestEnabled = true
+    }
+
+    func resetPasteboardInteractionState() {
+        acceptedPasteboardPasteTypes = []
+        acceptedPasteboardDropTypes = []
+        pasteboardDropHitTestEnabled = false
+        editCommandValidationSnapshot = nil
+    }
+
+    private func currentEditCommandValidationSnapshot() -> EditCommandValidationSnapshot {
+        if let snapshot = editCommandValidationSnapshot {
+            return snapshot
+        }
+
+        let enabledCommands = outerframeContentConnection?.validateEditCommandsSynchronously(
+            .standard,
+            timeoutMilliseconds: Self.editCommandValidationTimeoutMilliseconds
+        )
+        let snapshot = EditCommandValidationSnapshot(enabledCommands: enabledCommands)
+        editCommandValidationSnapshot = snapshot
+
+        DispatchQueue.main.async { [weak self] in
+            self?.editCommandValidationSnapshot = nil
+        }
+
+        return snapshot
+    }
+
+    private func contentValidation(for command: OuterframeEditCommandSet) -> Bool? {
+        currentEditCommandValidationSnapshot().enabledCommands?.contains(command)
     }
 
     private func writePasteboardItems(_ items: [OuterframeContentPasteboardItem]) -> Bool {
         guard !items.isEmpty else { return false }
 
-        var preparedItems: [(NSPasteboard.PasteboardType, Data)] = []
-        preparedItems.reserveCapacity(items.count)
-        for item in items where !item.typeIdentifier.isEmpty {
-            let type = NSPasteboard.PasteboardType(item.typeIdentifier)
-            preparedItems.append((type, item.data))
+        var nativeItems: [NSPasteboardWriting] = []
+        var filePromiseProviders: [AnyObject] = []
+        nativeItems.reserveCapacity(items.count)
+        for item in items {
+            if let fileURL = fileURLPasteboardWriter(for: item) {
+                nativeItems.append(fileURL)
+                continue
+            }
+
+            if let (payload, writer) = filePromiseWriter(for: item) {
+                let providerType = filePromiseProviderType(payload.name, fileType: payload.fileType)
+                let provider = NSFilePromiseProvider(fileType: providerType, delegate: writer)
+                provider.userInfo = writer
+                writer.completion = { [weak self, weak provider] _ in
+                    guard let provider else { return }
+                    self?.activePasteboardFilePromiseProviders.removeAll { $0 === provider }
+                }
+                nativeItems.append(provider)
+                filePromiseProviders.append(provider)
+                continue
+            }
+
+            let nativeItem = NSPasteboardItem()
+            var wroteRepresentation = false
+            for representation in item.representations where !representation.typeIdentifier.isEmpty {
+                let type = NSPasteboard.PasteboardType(representation.typeIdentifier)
+                if nativeItem.setData(representation.data, forType: type) {
+                    wroteRepresentation = true
+                }
+            }
+            if wroteRepresentation {
+                nativeItems.append(nativeItem)
+            }
         }
 
-        guard !preparedItems.isEmpty else { return false }
+        guard !nativeItems.isEmpty else { return false }
 
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
+        activePasteboardFilePromiseProviders.removeAll()
+        let wrote = pasteboard.writeObjects(nativeItems)
+        if wrote {
+            activePasteboardFilePromiseProviders.append(contentsOf: filePromiseProviders)
+        }
+        return wrote
+    }
 
-        var wroteAny = false
-        for (type, data) in preparedItems {
-            if pasteboard.setData(data, forType: type) {
-                wroteAny = true
+    private func fileURLPasteboardWriter(for item: OuterframeContentPasteboardItem) -> NSURL? {
+        guard let representation = item.representations.first(where: {
+            $0.typeIdentifier == NSPasteboard.PasteboardType.fileURL.rawValue
+        }),
+              let urlString = String(data: representation.data, encoding: .utf8),
+              let url = URL(string: urlString),
+              url.isFileURL else {
+            return nil
+        }
+        return url as NSURL
+    }
+
+    private func pasteboardItems(from pasteboard: NSPasteboard,
+                                 acceptedTypes: [NSPasteboard.PasteboardType]) -> [OuterframeContentPasteboardItem] {
+        guard let pasteboardItems = pasteboard.pasteboardItems else { return [] }
+        return pasteboardItems.compactMap { nativeItem in
+            let candidateTypes = acceptedTypes.isEmpty
+                ? nativeItem.types
+                : nativeItem.types.filter { acceptedTypes.contains($0) }
+            let representations = candidateTypes.compactMap { type -> OuterframeContentPasteboardRepresentation? in
+                guard let data = nativeItem.data(forType: type) else { return nil }
+                return OuterframeContentPasteboardRepresentation(typeIdentifier: type.rawValue, data: data)
             }
+            guard !representations.isEmpty else { return nil }
+            return OuterframeContentPasteboardItem(representations: representations)
+        }
+    }
+
+    private func completePasteboardAccessRequest(requestID: UUID,
+                                                 operation: OuterframePasteboardAccessOperation,
+                                                 pasteboardTypeIdentifiers: [String],
+                                                 items: [OuterframeContentPasteboardItem],
+                                                 allowed: Bool) {
+        guard allowed else {
+            outerframeContentConnection?.sendPasteboardAccessResponse(requestID: requestID,
+                                                                      granted: false,
+                                                                      items: [])
+            return
         }
 
-        return wroteAny
+        switch operation {
+        case .read:
+            let pasteboardTypes = pasteboardTypeIdentifiers.filter { !$0.isEmpty }.map { NSPasteboard.PasteboardType($0) }
+            let responseItems = pasteboardItems(from: NSPasteboard.general, acceptedTypes: pasteboardTypes)
+            outerframeContentConnection?.sendPasteboardAccessResponse(requestID: requestID,
+                                                                      granted: !responseItems.isEmpty,
+                                                                      items: responseItems)
+        case .write:
+            let wrote = writePasteboardItems(items)
+            outerframeContentConnection?.sendPasteboardAccessResponse(requestID: requestID,
+                                                                      granted: wrote,
+                                                                      items: [])
+        }
     }
 
     public func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        if let capabilities = editingCapabilitiesOverride {
-            switch menuItem.action {
-            case #selector(copy(_:)):
-                return capabilities.canCopy
-            case #selector(cut(_:)):
-                return capabilities.canCut
-            case #selector(paste(_:)):
-                return capabilities.allowsPaste(from: NSPasteboard.general)
-            default:
-                break
-            }
-        }
-
         switch menuItem.action {
         case #selector(copy(_:)):
-            if currentInputMode.allowsTextInput {
-                return true
-            }
-            return currentSelectedText?.isEmpty == false
+            return contentValidation(for: .copy) == true
+
         case #selector(cut(_:)):
-            if currentInputMode.allowsTextInput {
-                return true
+            return contentValidation(for: .cut) == true
+
+        case #selector(paste(_:)) where !acceptedPasteboardPasteTypes.isEmpty:
+            guard contentValidation(for: .paste) == true else {
+                return false
             }
-            return false
+            return pasteboardMatchesAcceptedTypes(NSPasteboard.general, acceptedTypes: acceptedPasteboardPasteTypes)
+
         case #selector(selectAll(_:)):
-            return currentInputMode.allowsTextInput
+            return contentValidation(for: .selectAll) == true
+        case #selector(performFindPanelAction(_:)):
+            return validateFindMenuAction(menuItem)
         case #selector(paste(_:)):
-            if currentInputMode.allowsTextInput {
-                return NSPasteboard.general.string(forType: .string) != nil
-            }
-            return false
+            return contentValidation(for: .paste) == true && NSPasteboard.general.string(forType: .string) != nil
+        case #selector(lookUp(_:)):
+            return currentSelectedAttributedText != nil
         default:
             return true
         }
     }
 
-    @objc func copy(_ sender: Any?) {
-        if let capabilities = editingCapabilitiesOverride, !capabilities.canCopy {
-            NSSound.beep()
-            return
-        }
-
-        if currentInputMode.allowsTextInput {
-            requestPasteboardItemsForCopy { [weak self] items in
-                Task { @MainActor in
-                    guard let self else { return }
-                    if let items, self.writePasteboardItems(items) {
-                        return
-                    }
-                    if let fallback = self.currentSelectedText, !fallback.isEmpty {
-                        let pasteboard = NSPasteboard.general
-                        pasteboard.clearContents()
-                        pasteboard.setString(fallback, forType: .string)
-                    }
-                }
-            }
-            return
-        }
-
-        if let selectedText = currentSelectedText, !selectedText.isEmpty {
-            let pasteboard = NSPasteboard.general
-            pasteboard.clearContents()
-            pasteboard.setString(selectedText, forType: .string)
+    private func validateFindMenuAction(_ menuItem: NSMenuItem) -> Bool {
+        switch NSFindPanelAction(rawValue: UInt(menuItem.tag)) {
+        case .showFindPanel:
+            return contentValidation(for: .find) == true
+        case .next:
+            return contentValidation(for: .findNext) == true
+        case .previous:
+            return contentValidation(for: .findPrevious) == true
+        case .setFindString:
+            return contentValidation(for: .copy) == true
+        default:
+            return false
         }
     }
 
-    @objc func cut(_ sender: Any?) {
-        if let capabilities = editingCapabilitiesOverride, !capabilities.canCut {
-            NSSound.beep()
-            return
-        }
-
-        guard currentInputMode.allowsTextInput else {
+    @objc func copy(_ sender: Any?) {
+        guard contentValidation(for: .copy) == true else {
             NSSound.beep()
             return
         }
@@ -905,58 +1411,185 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
                     NSSound.beep()
                     return
                 }
-                self.sendTextCommand("deleteBackward")
+            }
+        }
+    }
+
+    @objc func cut(_ sender: Any?) {
+        guard contentValidation(for: .cut) == true else {
+            NSSound.beep()
+            return
+        }
+
+        requestPasteboardItemsForCut { [weak self] items in
+            Task { @MainActor in
+                guard let self else { return }
+                guard let items, self.writePasteboardItems(items) else {
+                    NSSound.beep()
+                    return
+                }
             }
         }
     }
 
     public override func selectAll(_ sender: Any?) {
-        guard currentInputMode.allowsTextInput else {
-            super.selectAll(sender)
+        guard contentValidation(for: .selectAll) == true else {
+            NSSound.beep()
             return
         }
+
         sendTextCommand("selectAll")
     }
 
     @objc func paste(_ sender: Any?) {
         let pasteboard = NSPasteboard.general
 
-        if let capabilities = editingCapabilitiesOverride,
-           !capabilities.allowsPaste(from: pasteboard) {
+        guard contentValidation(for: .paste) == true else {
             NSSound.beep()
             return
         }
 
-        if currentInputMode.allowsTextInput {
-            if let capabilities = editingCapabilitiesOverride {
-                guard let firstItem = pasteboard.pasteboardItems?.first else {
-                    NSSound.beep()
-                    return
-                }
-
-                var payload: [OuterframeContentPasteboardItem] = []
-                payload.reserveCapacity(firstItem.types.count)
-                let acceptedTypes = capabilities.acceptablePasteboardTypes
-                for type in firstItem.types {
-                    if acceptedTypes.contains(type),
-                       let data = firstItem.data(forType: type) {
-                        payload.append(OuterframeContentPasteboardItem(typeIdentifier: type.rawValue, data: data))
-                    }
-                }
-
-                guard !payload.isEmpty else {
-                    NSSound.beep()
-                    return
-                }
-
-                sendPasteboardItemsForPaste(payload)
-            } else {
-                guard let text = pasteboard.string(forType: .string) else { return }
-                sendTextInput(text, replacementRange: NSRange(location: NSNotFound, length: 0))
+        if !acceptedPasteboardPasteTypes.isEmpty {
+            if acceptsFileAccess(acceptedTypes: acceptedPasteboardPasteTypes),
+               let fileURLs = pasteboard.readObjects(forClasses: [NSURL.self],
+                                                     options: [.urlReadingFileURLsOnly: true]) as? [URL],
+               !fileURLs.isEmpty {
+                pasteFileURLsFromPasteboard(fileURLs)
+                return
             }
+
+            guard pasteboardMatchesAcceptedTypes(pasteboard, acceptedTypes: acceptedPasteboardPasteTypes) else {
+                NSSound.beep()
+                return
+            }
+            let payload = pasteboardItems(from: pasteboard,
+                                          acceptedTypes: acceptedPasteboardPasteTypes)
+            guard !payload.isEmpty else {
+                NSSound.beep()
+                return
+            }
+            sendPasteboardItemsForPaste(payload)
             return
         }
-        NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: sender)
+
+        if currentInputMode.allowsTextInput {
+            guard let text = pasteboard.string(forType: .string) else { return }
+            sendTextInput(text, replacementRange: NSRange(location: NSNotFound, length: 0))
+            return
+        }
+
+        NSSound.beep()
+    }
+
+    @objc public func performFindPanelAction(_ sender: Any?) {
+        guard let action = findPanelAction(from: sender) else {
+            sendTextCommand("find")
+            return
+        }
+
+        switch action {
+        case .showFindPanel:
+            sendTextCommand("find")
+        case .next:
+            sendTextCommand("findNext")
+        case .previous:
+            sendTextCommand("findPrevious")
+        case .setFindString:
+            sendTextCommand("useSelectionForFind")
+        default:
+            NSSound.beep()
+        }
+    }
+
+    private func findPanelAction(from sender: Any?) -> NSFindPanelAction? {
+        if let menuItem = sender as? NSMenuItem {
+            return NSFindPanelAction(rawValue: UInt(menuItem.tag))
+        }
+
+        if let number = sender as? NSNumber {
+            return NSFindPanelAction(rawValue: number.uintValue)
+        }
+
+        if let intValue = sender as? Int {
+            return NSFindPanelAction(rawValue: UInt(intValue))
+        }
+
+        return nil
+    }
+
+    private func pasteFileURLsFromPasteboard(_ fileURLs: [URL]) {
+        guard let stagingDirectoryURL = outerframeContentConnection?.currentStagedFileDirectoryURL else {
+            NSSound.beep()
+            return
+        }
+        let connection = outerframeContentConnection
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            var accesses: [OuterframeDroppedFileAccess] = []
+            var items: [OuterframeContentPasteboardItem] = []
+
+            for url in fileURLs {
+                guard url.isFileURL else { continue }
+                guard let resourceValues = try? url.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey, .fileSizeKey, .contentTypeKey]),
+                      resourceValues.isRegularFile == true || resourceValues.isDirectory == true else {
+                    continue
+                }
+
+                let accessID = UUID()
+                let fileName = Self.sanitizedStagedFileName(url.lastPathComponent)
+                let accessDirectory = stagingDirectoryURL
+                    .appendingPathComponent("dropped-file-access", isDirectory: true)
+                    .appendingPathComponent(accessID.uuidString, isDirectory: true)
+                let stagedURL = accessDirectory.appendingPathComponent(fileName,
+                                                                       isDirectory: resourceValues.isDirectory == true)
+
+                do {
+                    try FileManager.default.createDirectory(at: accessDirectory, withIntermediateDirectories: true)
+                    if FileManager.default.fileExists(atPath: stagedURL.path) {
+                        try FileManager.default.removeItem(at: stagedURL)
+                    }
+                    try Self.stageDroppedFile(from: url, to: stagedURL, isDirectory: resourceValues.isDirectory == true)
+                } catch {
+                    try? FileManager.default.removeItem(at: accessDirectory)
+                    print("Outerframe pasted file access: failed to stage '\(url.path)': \(error)")
+                    continue
+                }
+
+                let stagedValues = try? stagedURL.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey, .contentTypeKey])
+                let isDirectory = stagedValues?.isDirectory == true
+                let payload = OuterframeDroppedFileAccessPayload(
+                    id: accessID,
+                    name: fileName,
+                    localPath: stagedURL.path,
+                    fileSize: isDirectory ? nil : stagedValues?.fileSize.map { UInt64(max($0, 0)) },
+                    fileType: stagedValues?.contentType?.identifier ?? resourceValues.contentType?.identifier,
+                    isDirectory: isDirectory
+                )
+                guard let data = OuterframePasteboardPayload.encodeDroppedFileAccess(payload) else {
+                    try? FileManager.default.removeItem(at: accessDirectory)
+                    continue
+                }
+
+                accesses.append(OuterframeDroppedFileAccess(id: accessID,
+                                                            stagedURL: stagedURL,
+                                                            cleanupURL: accessDirectory))
+                items.append(OuterframeContentPasteboardItem(representations: [
+                    OuterframeContentPasteboardRepresentation(typeIdentifier: Self.droppedFileAccessPasteboardTypeIdentifier,
+                                                              data: data)
+                ]))
+            }
+
+            await MainActor.run {
+                guard let self, !items.isEmpty else {
+                    NSSound.beep()
+                    return
+                }
+                for access in accesses {
+                    self.droppedFileAccesses[access.id] = access
+                }
+                connection?.sendPasteboardItemsForPaste(items)
+            }
+        }
     }
 
     @objc func lookUp(_ sender: Any?) {
@@ -968,18 +1601,42 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
         self.showDefinition(for: attributedText, at: rightClickLocation)
     }
 
+    @objc func pluginContextMenuItemSelected(_ sender: NSMenuItem) {
+        guard let action = sender.representedObject as? PluginContextMenuAction else { return }
+        withActivePluginConnection { connection in
+            connection.sendToOuterframeContent(.contextMenuItemSelected(menuID: action.menuID,
+                                                                        itemID: action.itemID))
+        }
+    }
+
+    @objc func copyPluginContextMenuSelection(_ sender: NSMenuItem) {
+        requestPasteboardItemsForCopy { [weak self] items in
+            Task { @MainActor in
+                guard let self else { return }
+                if let items, self.writePasteboardItems(items) {
+                    return
+                }
+                NSSound.beep()
+            }
+        }
+    }
+
     public override func mouseDown(with event: NSEvent) {
+        lastMouseDownEvent = event
+        lastMouseDraggedEvent = nil
         let point = convert(event.locationInWindow, from: nil)
         handleMouseDown(at: point, modifierFlags: event.modifierFlags, clickCount: event.clickCount)
         super.mouseDown(with: event)
     }
 
     public override func mouseDragged(with event: NSEvent) {
+        lastMouseDraggedEvent = event
         let point = convert(event.locationInWindow, from: nil)
         handleMouseDragged(to: point, modifierFlags: event.modifierFlags)
     }
 
     public override func mouseUp(with event: NSEvent) {
+        lastMouseDraggedEvent = nil
         let point = convert(event.locationInWindow, from: nil)
         handleMouseUp(at: point, modifierFlags: event.modifierFlags)
     }
@@ -1100,8 +1757,13 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
                 #selector(insertNewline(_:)): "insertNewline",
                 #selector(insertTab(_:)): "insertTab",
                 #selector(insertBacktab(_:)): "insertBacktab",
-                #selector(cancelOperation(_:)): "cancelOperation"
+                #selector(cancelOperation(_:)): "cancelOperation",
+                NSSelectorFromString("saveDocument:"): "saveDocument"
             ]
+
+            if selector == NSSelectorFromString("noop:") {
+                return
+            }
 
             if let command = commandMap[selector] {
                 // Debug: Log the command being sent
@@ -1147,50 +1809,158 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
     }
 
     public func showPluginRequestedContextMenu(attributedText: NSAttributedString, at location: CGPoint) {
-        let selectedText = attributedText.string.isEmpty ? nil : attributedText.string
+        let selectedText = attributedText.string
+        var items: [OuterframeContextMenuItem] = []
+        if !selectedText.isEmpty {
+            items.append(OuterframeContextMenuItem(id: "lookup",
+                                                   title: "Look Up \"\(selectedText)\"",
+                                                   action: .standardLookUp))
+            items.append(OuterframeContextMenuItem(id: "lookup-separator",
+                                                   title: "",
+                                                   kind: .separator,
+                                                   isEnabled: false))
+        }
+        items.append(OuterframeContextMenuItem(id: "cut", title: "Cut", action: .standardCut))
+        items.append(OuterframeContextMenuItem(id: "copy", title: "Copy", action: .standardCopy))
+        items.append(OuterframeContextMenuItem(id: "paste", title: "Paste", action: .standardPaste))
+        items.append(OuterframeContextMenuItem(id: "select-all", title: "Select All", action: .standardSelectAll))
+        if !selectedText.isEmpty {
+            items.append(OuterframeContextMenuItem(id: "services-separator",
+                                                   title: "",
+                                                   kind: .separator,
+                                                   isEnabled: false))
+            items.append(OuterframeContextMenuItem(id: "services", title: "Services", action: .standardServices))
+        }
+        showPluginRequestedContextMenuItems(menuID: UUID(),
+                                            attributedText: attributedText,
+                                            items: items,
+                                            at: location)
+    }
+
+    public func showPluginRequestedContextMenuItems(menuID: UUID,
+                                                    attributedText: NSAttributedString?,
+                                                    items: [OuterframeContextMenuItem],
+                                                    at location: CGPoint) {
+        guard !items.isEmpty else { return }
+
+        let selectedText = attributedText?.string.isEmpty == false ? attributedText?.string : nil
         currentSelectedAttributedText = selectedText == nil ? nil : attributedText
         currentSelectedText = selectedText
         rightClickLocation = location
 
         let menu = NSMenu()
+        menu.autoenablesItems = false
+        func append(_ snapshots: [OuterframeContextMenuItem], to menu: NSMenu) {
+            for item in snapshots {
+                switch item.kind {
+                case .separator:
+                    menu.addItem(NSMenuItem.separator())
 
-        if let selectedText {
-            let lookupItem = NSMenuItem(title: "Look Up \"\(selectedText)\"", action: #selector(lookUp(_:)), keyEquivalent: "")
-            lookupItem.target = self
-            menu.addItem(lookupItem)
+                case .label:
+                    let menuItem = NSMenuItem(title: item.title, action: nil, keyEquivalent: "")
+                    menuItem.isEnabled = false
+                    menuItem.view = PluginContextMenuLabelView(title: item.title, style: item.style)
+                    menu.addItem(menuItem)
 
-            menu.addItem(NSMenuItem.separator())
+                case .submenu:
+                    let menuItem = NSMenuItem(title: item.title, action: nil, keyEquivalent: "")
+                    configurePluginContextMenuItem(menuItem, from: item, menuID: menuID)
+                    let submenu = NSMenu()
+                    append(item.children, to: submenu)
+                    menuItem.submenu = submenu
+                    menu.addItem(menuItem)
+
+                case .command:
+                    if item.action == .standardServices {
+                        let servicesItem = NSMenuItem(title: item.title, action: nil, keyEquivalent: "")
+                        configurePluginContextMenuItem(servicesItem, from: item, menuID: menuID)
+                        let servicesMenu = NSMenu()
+                        servicesItem.submenu = servicesMenu
+                        servicesItem.isEnabled = item.isEnabled && selectedText != nil
+                        menu.addItem(servicesItem)
+                        NSApp.servicesMenu = servicesMenu
+                        continue
+                    }
+
+                    let selector: Selector
+                    let fallbackKeyEquivalent: String
+                    switch item.action {
+                    case .contentCommand:
+                        selector = #selector(pluginContextMenuItemSelected(_:))
+                        fallbackKeyEquivalent = ""
+                    case .standardCopy:
+                        selector = #selector(copy(_:))
+                        fallbackKeyEquivalent = "c"
+                    case .standardPaste:
+                        selector = #selector(paste(_:))
+                        fallbackKeyEquivalent = "v"
+                    case .standardCut:
+                        selector = #selector(cut(_:))
+                        fallbackKeyEquivalent = "x"
+                    case .standardSelectAll:
+                        selector = #selector(selectAll(_:))
+                        fallbackKeyEquivalent = "a"
+                    case .standardLookUp:
+                        selector = #selector(lookUp(_:))
+                        fallbackKeyEquivalent = ""
+                    case .standardServices:
+                        continue
+                    }
+                    let keyEquivalent = item.keyEquivalent.isEmpty ? fallbackKeyEquivalent : item.keyEquivalent
+                    let menuItem = NSMenuItem(title: item.title,
+                                              action: selector,
+                                              keyEquivalent: keyEquivalent)
+                    menuItem.target = self
+                    configurePluginContextMenuItem(menuItem, from: item, menuID: menuID)
+                    menu.addItem(menuItem)
+                }
+            }
         }
-
-        let cutItem = NSMenuItem(title: "Cut", action: #selector(cut(_:)), keyEquivalent: "x")
-        cutItem.target = self
-        menu.addItem(cutItem)
-
-        let copyItem = NSMenuItem(title: "Copy", action: #selector(copy(_:)), keyEquivalent: "c")
-        copyItem.target = self
-        menu.addItem(copyItem)
-
-        let pasteItem = NSMenuItem(title: "Paste", action: #selector(paste(_:)), keyEquivalent: "v")
-        pasteItem.target = self
-        menu.addItem(pasteItem)
-
-        let selectAllItem = NSMenuItem(title: "Select All", action: #selector(selectAll(_:)), keyEquivalent: "a")
-        selectAllItem.target = self
-        menu.addItem(selectAllItem)
-
-        if selectedText != nil {
-            menu.addItem(NSMenuItem.separator())
-
-            let servicesItem = NSMenuItem(title: "Services", action: nil, keyEquivalent: "")
-            let servicesMenu = NSMenu()
-            servicesItem.submenu = servicesMenu
-            menu.addItem(servicesItem)
-            NSApp.servicesMenu = servicesMenu
-        }
+        append(items, to: menu)
 
         menu.allowsContextMenuPlugIns = true
-
         menu.popUp(positioning: nil, at: location, in: self)
+    }
+
+    private func configurePluginContextMenuItem(_ menuItem: NSMenuItem,
+                                                from snapshot: OuterframeContextMenuItem,
+                                                menuID: UUID) {
+        menuItem.isEnabled = snapshot.isEnabled
+        menuItem.representedObject = PluginContextMenuAction(menuID: menuID, itemID: snapshot.id)
+        menuItem.indentationLevel = Int(snapshot.indentationLevel)
+        switch snapshot.state {
+        case .off:
+            menuItem.state = .off
+        case .on:
+            menuItem.state = .on
+        case .mixed:
+            menuItem.state = .mixed
+        }
+        if snapshot.keyEquivalentModifierMask != 0 {
+            menuItem.keyEquivalentModifierMask = NSEvent.ModifierFlags(rawValue: UInt(snapshot.keyEquivalentModifierMask))
+        }
+        if !snapshot.systemImageName.isEmpty,
+           let image = NSImage(systemSymbolName: snapshot.systemImageName, accessibilityDescription: snapshot.title) {
+            menuItem.image = image
+        }
+        if let attributedTitle = attributedTitle(for: snapshot.title, style: snapshot.style) {
+            menuItem.attributedTitle = attributedTitle
+        }
+    }
+
+    private func attributedTitle(for title: String,
+                                 style: OuterframeContextMenuItemStyle) -> NSAttributedString? {
+        var attributes: [NSAttributedString.Key: Any] = [:]
+        if style.fontSize > 0 || style.fontWeight != 0 {
+            let fontSize = CGFloat(style.fontSize > 0 ? style.fontSize : Float32(NSFont.systemFontSize))
+            let fontWeight = style.fontWeight != 0 ? NSFont.Weight(rawValue: CGFloat(style.fontWeight)) : .regular
+            attributes[.font] = NSFont.systemFont(ofSize: fontSize, weight: fontWeight)
+        }
+        if let color = NSColor(outerframeMenuRGBA: style.textColorRGBA) {
+            attributes[.foregroundColor] = color
+        }
+        guard !attributes.isEmpty else { return nil }
+        return NSAttributedString(string: title, attributes: attributes)
     }
 
     public func showPluginRequestedDefinition(attributedText: NSAttributedString, at location: CGPoint) {
@@ -1272,6 +2042,364 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
         return true
     }
 
+    // MARK: - Drag and Drop
+
+    private func draggingOperation(from rawMask: UInt32) -> NSDragOperation {
+        var operation: NSDragOperation = []
+        if rawMask & UInt32(NSDragOperation.copy.rawValue) != 0 {
+            operation.insert(.copy)
+        }
+        if rawMask & UInt32(NSDragOperation.move.rawValue) != 0 {
+            operation.insert(.move)
+        }
+        if rawMask & UInt32(NSDragOperation.link.rawValue) != 0 {
+            operation.insert(.link)
+        }
+        return operation.isEmpty ? .copy : operation
+    }
+
+    private func dragPreview(for item: OuterframeContentDraggingItem,
+                             fallbackImage: NSImage,
+                             fallbackSize: NSSize,
+                             dragStartPoint: NSPoint) -> (NSRect, NSImage) {
+        if let previewImageData = item.previewImageData,
+           let previewImage = NSImage(data: previewImageData) {
+            let size = item.previewSize ?? previewImage.size
+            let frame: NSRect
+            if let previewFrameOrigin = item.previewFrameOrigin {
+                frame = NSRect(origin: previewFrameOrigin, size: size)
+            } else {
+                frame = dragFrame(size: size, around: dragStartPoint)
+            }
+            return (frame, previewImage)
+        }
+        return (dragFrame(size: fallbackSize, around: dragStartPoint), fallbackImage)
+    }
+
+    private func dragFrame(size: NSSize, around point: NSPoint) -> NSRect {
+        NSRect(x: point.x + 14,
+               y: point.y - size.height - 10,
+               width: size.width,
+               height: size.height)
+    }
+
+    private func fallbackFileIcon(fileName: String, fileType: String?) -> NSImage {
+        if let fileType,
+           let contentType = UTType(fileType) {
+            return NSWorkspace.shared.icon(for: contentType)
+        }
+
+        let fileExtension = URL(fileURLWithPath: fileName).pathExtension
+        if !fileExtension.isEmpty,
+           let contentType = UTType(filenameExtension: fileExtension) {
+            return NSWorkspace.shared.icon(for: contentType)
+        }
+
+        return NSWorkspace.shared.icon(for: UTType.data)
+    }
+
+    private func filePromiseProviderType(_ fileName: String, fileType: String?) -> String {
+        if let fileType,
+           let contentType = UTType(fileType),
+           contentType.conforms(to: .data) || contentType.conforms(to: .directory) {
+            return contentType.identifier
+        }
+
+        let fileExtension = URL(fileURLWithPath: fileName).pathExtension
+        if !fileExtension.isEmpty,
+           let contentType = UTType(filenameExtension: fileExtension),
+           contentType.conforms(to: .data) || contentType.conforms(to: .directory) {
+            return contentType.identifier
+        }
+
+        return UTType.data.identifier
+    }
+
+    private func filePromiseWriter(for item: OuterframeContentPasteboardItem) -> (OuterframeFilePromisePayload, OuterframeFilePromiseWriter)? {
+        guard let filePromiseRepresentation = item.representations.first(where: {
+            $0.typeIdentifier == Self.filePromisePasteboardTypeIdentifier
+        }),
+              let payload = OuterframePasteboardPayload.decodeFilePromise(filePromiseRepresentation.data) else {
+            return nil
+        }
+
+        let connection = outerframeContentConnection
+        let writer = OuterframeFilePromiseWriter(
+            promiseID: payload.id,
+            fileName: payload.name,
+            allowedStagingDirectoryURL: outerframeContentConnection?.currentStagedFileDirectoryURL,
+            requestStagedFile: { promiseID, completion in
+                let request: @Sendable () -> Void = {
+                    guard let connection else {
+                        completion(.failure(OuterframeContentConnectionError.disconnected))
+                        return
+                    }
+                    MainActor.assumeIsolated {
+                        connection.requestFilePromiseWrite(promiseID: promiseID, completion: completion)
+                    }
+                }
+                if Thread.isMainThread {
+                    request()
+                } else {
+                    DispatchQueue.main.async(execute: request)
+                }
+            }
+        )
+        return (payload, writer)
+    }
+
+    private func filePromiseWriter(for item: OuterframeContentDraggingItem) -> (OuterframeFilePromisePayload, OuterframeFilePromiseWriter)? {
+        filePromiseWriter(for: item.pasteboardItem)
+    }
+
+    private func makeDragItem(for item: OuterframeContentDraggingItem,
+                              dragStartPoint: NSPoint) -> (NSDraggingItem, AnyObject?)? {
+        if let (payload, writer) = filePromiseWriter(for: item) {
+            let providerType = filePromiseProviderType(payload.name, fileType: payload.fileType)
+            let provider = NSFilePromiseProvider(fileType: providerType, delegate: writer)
+            provider.userInfo = writer
+            writer.completion = { [weak self, weak provider] _ in
+                guard let provider else { return }
+                self?.activeFilePromiseWriters.removeAll { $0 === provider }
+            }
+            let draggingItem = NSDraggingItem(pasteboardWriter: provider)
+            let (frame, contents) = dragPreview(
+                for: item,
+                fallbackImage: fallbackFileIcon(fileName: payload.name, fileType: payload.fileType),
+                fallbackSize: NSSize(width: 96, height: 96),
+                dragStartPoint: dragStartPoint
+            )
+            draggingItem.setDraggingFrame(frame, contents: contents)
+            return (draggingItem, provider)
+        }
+
+        let pasteboardItem = NSPasteboardItem()
+        var wroteRepresentation = false
+        for representation in item.pasteboardItem.representations where !representation.typeIdentifier.isEmpty {
+            let pasteboardType = NSPasteboard.PasteboardType(representation.typeIdentifier)
+            if pasteboardItem.setData(representation.data, forType: pasteboardType) {
+                wroteRepresentation = true
+            }
+        }
+        guard wroteRepresentation else { return nil }
+        let draggingItem = NSDraggingItem(pasteboardWriter: pasteboardItem)
+        let (frame, contents) = dragPreview(
+            for: item,
+            fallbackImage: NSWorkspace.shared.icon(for: UTType.data),
+            fallbackSize: NSSize(width: 96, height: 48),
+            dragStartPoint: dragStartPoint
+        )
+        draggingItem.setDraggingFrame(frame, contents: contents)
+        return (draggingItem, nil)
+    }
+
+    func beginDraggingPasteboardItems(_ items: [OuterframeContentDraggingItem], operationMask: UInt32) {
+        guard let event = lastMouseDraggedEvent ?? lastMouseDownEvent ?? NSApp.currentEvent else { return }
+        let dragStartPoint = convert(event.locationInWindow, from: nil)
+
+        var dragItems: [NSDraggingItem] = []
+        var filePromiseWriters: [AnyObject] = []
+
+        for item in items {
+            guard let (draggingItem, filePromiseWriter) = makeDragItem(for: item, dragStartPoint: dragStartPoint) else { continue }
+            dragItems.append(draggingItem)
+            if let filePromiseWriter {
+                filePromiseWriters.append(filePromiseWriter)
+            }
+        }
+
+        guard !dragItems.isEmpty else { return }
+        currentDraggingOperationMask = draggingOperation(from: operationMask)
+        activeFilePromiseWriters.append(contentsOf: filePromiseWriters)
+        beginDraggingSession(with: dragItems, event: event, source: self)
+    }
+
+    public func draggingSession(_ session: NSDraggingSession,
+                                sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        currentDraggingOperationMask
+    }
+
+    public func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        currentDraggingOperationMask = .copy
+    }
+
+    public func ignoreModifierKeys(for session: NSDraggingSession) -> Bool {
+        false
+    }
+
+    public override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        acceptableDropOperation(for: sender)
+    }
+
+    public override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        acceptableDropOperation(for: sender)
+    }
+
+    public override func draggingExited(_ sender: NSDraggingInfo?) {
+        super.draggingExited(sender)
+    }
+
+    public override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard acceptableDropOperation(for: sender) != [] else { return false }
+        let pasteboard = sender.draggingPasteboard
+        let point = convert(sender.draggingLocation, from: nil)
+
+        if let fileURLs = pasteboard.readObjects(forClasses: [NSURL.self],
+                                                 options: [.urlReadingFileURLsOnly: true]) as? [URL],
+           !fileURLs.isEmpty,
+           acceptsDroppedFilesForAccess() {
+            guard let stagingDirectoryURL = outerframeContentConnection?.currentStagedFileDirectoryURL else {
+                return false
+            }
+            let connection = outerframeContentConnection
+            Task.detached(priority: .userInitiated) { [weak self] in
+                var accesses: [OuterframeDroppedFileAccess] = []
+                var items: [OuterframeContentPasteboardItem] = []
+
+                for url in fileURLs {
+                    guard url.isFileURL else { continue }
+                    guard let resourceValues = try? url.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey, .fileSizeKey, .contentTypeKey]),
+                          resourceValues.isRegularFile == true || resourceValues.isDirectory == true else {
+                        continue
+                    }
+
+                    let accessID = UUID()
+                    let fileName = Self.sanitizedStagedFileName(url.lastPathComponent)
+                    let accessDirectory = stagingDirectoryURL
+                        .appendingPathComponent("dropped-file-access", isDirectory: true)
+                        .appendingPathComponent(accessID.uuidString, isDirectory: true)
+                    let stagedURL = accessDirectory.appendingPathComponent(fileName,
+                                                                           isDirectory: resourceValues.isDirectory == true)
+
+                    do {
+                        try FileManager.default.createDirectory(at: accessDirectory, withIntermediateDirectories: true)
+                        if FileManager.default.fileExists(atPath: stagedURL.path) {
+                            try FileManager.default.removeItem(at: stagedURL)
+                        }
+                        try Self.stageDroppedFile(from: url, to: stagedURL, isDirectory: resourceValues.isDirectory == true)
+                    } catch {
+                        try? FileManager.default.removeItem(at: accessDirectory)
+                        print("Outerframe dropped file access: failed to stage '\(url.path)': \(error)")
+                        continue
+                    }
+
+                    let stagedValues = try? stagedURL.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey, .contentTypeKey])
+                    let isDirectory = stagedValues?.isDirectory == true
+                    let payload = OuterframeDroppedFileAccessPayload(
+                        id: accessID,
+                        name: fileName,
+                        localPath: stagedURL.path,
+                        fileSize: isDirectory ? nil : stagedValues?.fileSize.map { UInt64(max($0, 0)) },
+                        fileType: stagedValues?.contentType?.identifier ?? resourceValues.contentType?.identifier,
+                        isDirectory: isDirectory
+                    )
+                    guard let data = OuterframePasteboardPayload.encodeDroppedFileAccess(payload) else {
+                        try? FileManager.default.removeItem(at: accessDirectory)
+                        continue
+                    }
+
+                    accesses.append(OuterframeDroppedFileAccess(id: accessID,
+                                                                stagedURL: stagedURL,
+                                                                cleanupURL: accessDirectory))
+                    items.append(OuterframeContentPasteboardItem(representations: [
+                        OuterframeContentPasteboardRepresentation(typeIdentifier: Self.droppedFileAccessPasteboardTypeIdentifier,
+                                                                  data: data)
+                    ]))
+                }
+
+                await MainActor.run {
+                    guard let self, !items.isEmpty else { return }
+                    for access in accesses {
+                        self.droppedFileAccesses[access.id] = access
+                    }
+                    connection?.sendPasteboardItemsForDrop(items, at: point)
+                }
+            }
+            return true
+        }
+
+        let items = pasteboardItemsForDrop(from: pasteboard)
+        guard !items.isEmpty else { return false }
+        withActivePluginConnection { connection in
+            connection.sendPasteboardItemsForDrop(items, at: point)
+        }
+        return true
+    }
+
+    private func acceptableDropOperation(for sender: NSDraggingInfo) -> NSDragOperation {
+        guard !acceptedPasteboardDropTypes.isEmpty else { return [] }
+        let pasteboard = sender.draggingPasteboard
+
+        if !pasteboardDropHitTestEnabled {
+            guard pasteboardMatchesAcceptedTypes(pasteboard, acceptedTypes: acceptedPasteboardDropTypes) else { return [] }
+            return sender.draggingSourceOperationMask.contains(.copy) ? .copy : []
+        }
+
+        guard let outerframeContentConnection else { return [] }
+        let requestedOperationMask = UInt32(truncatingIfNeeded: sender.draggingSourceOperationMask.rawValue)
+        let responseMask = outerframeContentConnection.validatePasteboardDropSynchronously(
+            point: convert(sender.draggingLocation, from: nil),
+            pasteboardTypes: pasteboardTypeIdentifiersForValidation(from: pasteboard),
+            operationMask: requestedOperationMask,
+            modifierFlags: UInt64(NSApp.currentEvent?.modifierFlags.rawValue ?? 0),
+            timeoutMilliseconds: Self.pasteboardDropHitTestTimeoutMilliseconds
+        ) ?? 0
+        let allowed = NSDragOperation(rawValue: UInt(responseMask)).intersection(sender.draggingSourceOperationMask)
+        return allowed.contains(.copy) ? .copy : []
+    }
+
+    private func pasteboardMatchesAcceptedTypes(_ pasteboard: NSPasteboard,
+                                                acceptedTypes: [NSPasteboard.PasteboardType]) -> Bool {
+        guard !acceptedTypes.isEmpty else { return false }
+        if let availableTypes = pasteboard.types {
+            for type in availableTypes where acceptedTypes.contains(type) {
+                return true
+            }
+        }
+
+        let acceptsLocalFiles = acceptedTypes.contains(NSPasteboard.PasteboardType(Self.droppedFileAccessPasteboardTypeIdentifier))
+            || acceptedTypes.contains(.fileURL)
+        return acceptsLocalFiles && pasteboard.canReadObject(forClasses: [NSURL.self],
+                                                             options: [.urlReadingFileURLsOnly: true])
+    }
+
+    private func acceptsDroppedFilesForAccess() -> Bool {
+        acceptsFileAccess(acceptedTypes: acceptedPasteboardDropTypes)
+    }
+
+    private func acceptsFileAccess(acceptedTypes: [NSPasteboard.PasteboardType]) -> Bool {
+        acceptedTypes.contains(NSPasteboard.PasteboardType(Self.droppedFileAccessPasteboardTypeIdentifier))
+            || acceptedTypes.contains(.fileURL)
+    }
+
+    private func pasteboardTypeIdentifiersForValidation(from pasteboard: NSPasteboard) -> [String] {
+        var identifiers = Set((pasteboard.types ?? []).map(\.rawValue))
+        if pasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) {
+            identifiers.insert(NSPasteboard.PasteboardType.fileURL.rawValue)
+            identifiers.insert(Self.droppedFileAccessPasteboardTypeIdentifier)
+        }
+        return identifiers.sorted()
+    }
+
+    private func pasteboardItemsForDrop(from pasteboard: NSPasteboard) -> [OuterframeContentPasteboardItem] {
+        guard !acceptedPasteboardDropTypes.isEmpty else { return [] }
+
+        if pasteboard.canReadObject(forClasses: [NSURL.self],
+                                     options: [.urlReadingFileURLsOnly: true]) {
+            return []
+        }
+
+        guard pasteboard.pasteboardItems?.first != nil else { return [] }
+        return pasteboardItems(from: pasteboard, acceptedTypes: acceptedPasteboardDropTypes)
+    }
+
+    nonisolated private static func stageDroppedFile(from sourceURL: URL, to destinationURL: URL, isDirectory: Bool) throws {
+        if !isDirectory && clonefile(sourceURL.path, destinationURL.path, 0) == 0 {
+            return
+        }
+        try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+    }
+
     // MARK: - Accessibility
 
     public override func isAccessibilityElement() -> Bool {
@@ -1280,15 +2408,13 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
 
     @MainActor
     public override func accessibilityChildren() -> [Any]? {
-        recordAccessibilityQuery()
-        requestAccessibilitySnapshotIfNeeded(force: false)
+        refreshAccessibilityElements()
         return accessibilityElements.isEmpty ? nil : accessibilityElements
     }
 
     public override func accessibilityHitTest(_ point: NSPoint) -> Any? {
         let hitElement: OuterframeAccessibilityElement? = MainActor.assumeIsolated {
-            recordAccessibilityQuery()
-            requestAccessibilitySnapshotIfNeeded(force: false)
+            refreshAccessibilityElements()
             return hitTestAccessibilityElementsOnMain(point: point, elements: accessibilityElements)
         }
         if let element = hitElement {
@@ -1298,72 +2424,26 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
     }
 
     func resetAccessibilitySnapshot() {
-        accessibilitySnapshot = nil
         accessibilityElements = []
-        accessibilityRequestInFlight = false
-        accessibilitySnapshotIsStale = false
-        lastAccessibilityQueryUptime = nil
-        pendingAccessibilityNotifications = []
-        needsInitialAccessibilityAnnouncement = true
-    }
-
-    func requestAccessibilitySnapshot(force: Bool) {
-        requestAccessibilitySnapshotIfNeeded(force: force)
     }
 
     func handleAccessibilityTreeChanged(notifications: OuterframeAccessibilityNotification) {
-        pendingAccessibilityNotifications.formUnion(notifications)
-        accessibilitySnapshotIsStale = true
-        if shouldMaintainLiveAccessibilitySnapshot {
-            requestAccessibilitySnapshotIfNeeded(force: true)
-        }
+        accessibilityElements = []
+        postAccessibilityNotifications(for: notifications)
     }
 
-    private func requestAccessibilitySnapshotIfNeeded(force: Bool) {
-        guard let connection = outerframeContentConnection else { return }
-        if accessibilityRequestInFlight {
-            return
+    @discardableResult
+    private func refreshAccessibilityElements() -> OuterframeAccessibilitySnapshot? {
+        guard let connection = outerframeContentConnection else {
+            accessibilityElements = []
+            return nil
         }
-        if !force, accessibilitySnapshot != nil, !accessibilitySnapshotIsStale {
-            return
-        }
-        accessibilityRequestInFlight = true
-        connection.requestAccessibilitySnapshot { [weak self] snapshot in
-            Task { @MainActor in
-                guard let self else { return }
-                self.accessibilityRequestInFlight = false
-                self.updateAccessibilitySnapshot(snapshot)
-            }
-        }
-    }
-
-    private func updateAccessibilitySnapshot(_ snapshot: OuterframeAccessibilitySnapshot?) {
+        let snapshot = connection.requestAccessibilitySnapshotSynchronously(
+            timeoutMilliseconds: Self.accessibilitySnapshotTimeoutMilliseconds
+        )
         let resolvedSnapshot = snapshot ?? OuterframeAccessibilitySnapshot.notImplementedSnapshot()
-        accessibilitySnapshot = resolvedSnapshot
         accessibilityElements = buildAccessibilityElements(from: resolvedSnapshot)
-        accessibilitySnapshotIsStale = false
-
-        var notificationsToPost = pendingAccessibilityNotifications
-        pendingAccessibilityNotifications = []
-        if notificationsToPost.isEmpty || needsInitialAccessibilityAnnouncement {
-            notificationsToPost.insert(.layoutChanged)
-        }
-        needsInitialAccessibilityAnnouncement = false
-        postAccessibilityNotifications(for: notificationsToPost)
-    }
-
-    private func recordAccessibilityQuery() {
-        lastAccessibilityQueryUptime = ProcessInfo.processInfo.systemUptime
-    }
-
-    private var shouldMaintainLiveAccessibilitySnapshot: Bool {
-        if cachedVoiceOverEnabled {
-            return true
-        }
-        guard let lastAccessibilityQueryUptime else {
-            return false
-        }
-        return ProcessInfo.processInfo.systemUptime - lastAccessibilityQueryUptime <= Self.accessibilityActiveInterval
+        return resolvedSnapshot
     }
 
     private func buildAccessibilityElements(from snapshot: OuterframeAccessibilitySnapshot) -> [OuterframeAccessibilityElement] {
@@ -1668,7 +2748,11 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
         }
 
         pluginIsReady = false
+        presentationBundleURL = nil
+        presentationStagingDirectoryURL = nil
         stopDisplayLink()
+        activeFilePromiseWriters.removeAll()
+        releaseAllDroppedFileAccesses()
 
         setOuterframeContentConnection(nil)
         let cleanupToken = UUID()
@@ -1704,8 +2788,10 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
 
     public func loadOuterframeContent(from url: URL,
                                       networkProxyEndpoint: OuterframeNetworkProxyEndpoint,
+                                      storageContext: OuterframeStorageContext,
                                       cacheContext: OuterframeCacheContext?,
-                                      bypassCache: Bool = false) async throws -> OuterframeViewLoadResult {
+                                      bypassCache: Bool = false,
+                                      historyEntryID: UUID? = nil) async throws -> OuterframeViewLoadResult {
         // Check for local bundle override (used for external OuterframeContent debugging)
         if let localPath = localBundleOverridePath {
             let localBundleURL = URL(fileURLWithPath: localPath)
@@ -1727,7 +2813,9 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
                                      data: pluginData,
                                      originalURL: originalURL,
                                      downloadURL: downloadURL,
-                                     networkProxyEndpoint: networkProxyEndpoint)
+                                     networkProxyEndpoint: networkProxyEndpoint,
+                                     storageContext: storageContext,
+                                     historyEntryID: historyEntryID)
                 return .loaded
             }
         }
@@ -1752,7 +2840,9 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
                                  data: pluginData,
                                  originalURL: originalURL,
                                  downloadURL: downloadURL,
-                                 networkProxyEndpoint: networkProxyEndpoint)
+                                 networkProxyEndpoint: networkProxyEndpoint,
+                                 storageContext: storageContext,
+                                 historyEntryID: historyEntryID)
             return .loaded
         }
     }
@@ -1766,21 +2856,27 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
                            data: Data,
                            originalURL: URL,
                            downloadURL: URL,
-                           networkProxyEndpoint: OuterframeNetworkProxyEndpoint) async throws {
+                           networkProxyEndpoint: OuterframeNetworkProxyEndpoint,
+                           storageContext: OuterframeStorageContext,
+                           historyEntryID: UUID? = nil) async throws {
         let pluginURLs = makePluginLoadURLStrings(originalURL: originalURL,
                                                   downloadURL: downloadURL)
         try await loadPlugin(bundleURL: bundleURL,
                              data: data,
                              outerURLString: pluginURLs.outerURLString,
                              bundleURLString: pluginURLs.bundleURLString,
-                             networkProxyEndpoint: networkProxyEndpoint)
+                             networkProxyEndpoint: networkProxyEndpoint,
+                             storageContext: storageContext,
+                             historyEntryID: historyEntryID)
     }
 
     func loadPlugin(bundleURL: URL,
                     data: Data,
                     outerURLString: String,
                     bundleURLString: String,
-                    networkProxyEndpoint: OuterframeNetworkProxyEndpoint) async throws {
+                    networkProxyEndpoint: OuterframeNetworkProxyEndpoint,
+                    storageContext: OuterframeStorageContext,
+                    historyEntryID: UUID? = nil) async throws {
         let connection: OuterframeContentConnection
 
         // Check if an external connection is already attached and ready BEFORE cleanup
@@ -1798,7 +2894,8 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
             setOuterframeContentConnection(connection)
 
             do {
-                try await connection.start(networkProxyEndpoint: networkProxyEndpoint)
+                try await connection.start(networkProxyEndpoint: networkProxyEndpoint,
+                                           storageContext: storageContext)
             } catch {
                 await connection.cleanup()
                 setOuterframeContentConnection(nil)
@@ -1809,6 +2906,8 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
         let viewportSize = bounds.size
         let width = viewportSize.width
         let height = viewportSize.height
+        presentationBundleURL = bundleURL.resolvingSymlinksInPath()
+        presentationStagingDirectoryURL = connection.currentStagedFileDirectoryURL?.resolvingSymlinksInPath()
 
         do {
             try await loadPluginWithDebugHandling(connection: connection,
@@ -1817,10 +2916,13 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
                                                   outerURLString: outerURLString,
                                                   bundleURLString: bundleURLString,
                                                   width: width,
-                                                  height: height)
+                                                  height: height,
+                                                  historyEntryID: historyEntryID)
         } catch {
             await connection.cleanup()
             setOuterframeContentConnection(nil)
+            presentationBundleURL = nil
+            presentationStagingDirectoryURL = nil
             throw error
         }
     }
@@ -1881,7 +2983,8 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
                                              outerURLString: String,
                                              bundleURLString: String,
                                              width: CGFloat,
-                                             height: CGFloat) async throws {
+                                             height: CGFloat,
+                                             historyEntryID: UUID?) async throws {
         if OuterframeDebugSettings.isDebugModeEnabled {
             try await waitForDebuggerBeforeLoadingPlugin(connection: connection,
                                                          bundleURL: bundleURL,
@@ -1889,14 +2992,16 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
                                                          outerURLString: outerURLString,
                                                          bundleURLString: bundleURLString,
                                                          width: width,
-                                                         height: height)
+                                                         height: height,
+                                                         historyEntryID: historyEntryID)
         } else {
             try await connection.loadPlugin(url: bundleURL,
                                             data: data,
                                             outerURLString: outerURLString,
                                             bundleURLString: bundleURLString,
                                             width: width,
-                                            height: height)
+                                            height: height,
+                                            historyEntryID: historyEntryID)
         }
     }
 
@@ -1906,7 +3011,8 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
                                                     outerURLString: String,
                                                     bundleURLString: String,
                                                     width: CGFloat,
-                                                    height: CGFloat) async throws {
+                                                    height: CGFloat,
+                                                    historyEntryID: UUID?) async throws {
         try await withCheckedThrowingContinuation { continuation in
             let pendingLoad = PendingDebugLoad(connection: connection,
                                                bundleURL: bundleURL,
@@ -1915,6 +3021,7 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
                                                bundleURLString: bundleURLString,
                                                width: width,
                                                height: height,
+                                               historyEntryID: historyEntryID,
                                                debuggerAttached: debuggerAttachedForCurrentConnection,
                                                continuation: continuation)
             pendingDebugLoad = pendingLoad
@@ -2255,6 +3362,7 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
         let bundleURLString = pending.bundleURLString
         let width = pending.width
         let height = pending.height
+        let historyEntryID = pending.historyEntryID
         let continuation = pending.continuation
         pending.continuation = nil
 
@@ -2265,7 +3373,8 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
                                                 outerURLString: outerURLString,
                                                 bundleURLString: bundleURLString,
                                                 width: width,
-                                                height: height)
+                                                height: height,
+                                                historyEntryID: historyEntryID)
                 continuation?.resume(returning: ())
             } catch {
                 continuation?.resume(throwing: error)
@@ -2381,7 +3490,7 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
         pluginIsReady = true
 
         // Update canvas with the plugin's context ID
-        resetEditingCapabilities()
+        resetPasteboardInteractionState()
         resetAccessibilitySnapshot()
         updateWithContextID(contextID)
 
@@ -2393,7 +3502,71 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
             outerframeContentConnection.sendWindowActiveState(isActive: windowIsActive)
         }
 
-        requestAccessibilitySnapshot(force: true)
+    }
+
+    func handlePasteboardAccessRequest(requestID: UUID,
+                                       operation: OuterframePasteboardAccessOperation,
+                                       pasteboardTypeIdentifiers: [String],
+                                       items: [OuterframeContentPasteboardItem]) {
+        if operation == .write {
+            completePasteboardAccessRequest(requestID: requestID,
+                                            operation: operation,
+                                            pasteboardTypeIdentifiers: pasteboardTypeIdentifiers,
+                                            items: items,
+                                            allowed: true)
+            return
+        }
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Allow Outerframe content to read the clipboard?"
+        alert.informativeText = "The content requested programmatic clipboard read access."
+        alert.addButton(withTitle: "Allow")
+        alert.addButton(withTitle: "Deny")
+
+        let finish: (Bool) -> Void = { [weak self] allowed in
+            self?.completePasteboardAccessRequest(requestID: requestID,
+                                                  operation: operation,
+                                                  pasteboardTypeIdentifiers: pasteboardTypeIdentifiers,
+                                                  items: items,
+                                                  allowed: allowed)
+        }
+
+        if let window {
+            alert.beginSheetModal(for: window) { response in
+                finish(response == .alertFirstButtonReturn)
+            }
+        } else {
+            finish(alert.runModal() == .alertFirstButtonReturn)
+        }
+    }
+
+    func releaseDroppedFileAccess(accessID: UUID) {
+        guard let access = droppedFileAccesses.removeValue(forKey: accessID) else { return }
+        try? FileManager.default.removeItem(at: access.cleanupURL)
+    }
+
+    private func releaseAllDroppedFileAccesses() {
+        let accesses = Array(droppedFileAccesses.values)
+        droppedFileAccesses.removeAll()
+        for access in accesses {
+            try? FileManager.default.removeItem(at: access.cleanupURL)
+        }
+    }
+
+    nonisolated private static func sanitizedStagedFileName(_ name: String) -> String {
+        let fallbackName = "Dropped File"
+        let baseName = URL(fileURLWithPath: name).lastPathComponent
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let nonEmptyName = baseName.isEmpty ? fallbackName : baseName
+        let sanitized = nonEmptyName
+            .components(separatedBy: CharacterSet(charactersIn: "/\0"))
+            .filter { !$0.isEmpty }
+            .joined(separator: "_")
+        if sanitized.isEmpty || sanitized == "." || sanitized == ".." {
+            return fallbackName
+        }
+        return sanitized
     }
 
     public func handleAccessibilityTreeChanged(notificationMask: UInt8) {
@@ -2401,8 +3574,8 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
         handleAccessibilityTreeChanged(notifications: notifications)
     }
 
-    func handleTextCursorUpdate(cursors: [OuterframeContentTextCursorSnapshot]) {
-        updateTextCursors(cursors)
+    func handleTextInputGeometryUpdate(_ geometry: OuterframeContentTextInputGeometry?) {
+        updateTextInputGeometry(geometry)
     }
 
     public func handlePluginOpenNewWindow(urlString: String, displayString: String?, preferredSize: CGSize?) {
@@ -2410,6 +3583,86 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
                                  didRequestOpenWindowWithURLString: urlString,
                                  displayString: displayString,
                                  preferredSize: preferredSize)
+    }
+
+    public func handlePluginNavigate(urlString: String) {
+        delegate?.outerframeView(self, didRequestNavigateToURLString: urlString)
+    }
+
+    public func handlePluginOpenNewTab(urlString: String, displayString: String?) {
+        delegate?.outerframeView(self,
+                                 didRequestOpenTabWithURLString: urlString,
+                                 displayString: displayString)
+    }
+
+    public func handlePluginHistoryPushEntry(entryID: UUID, urlString: String?) {
+        delegate?.outerframeView(self, didRequestHistoryPushEntryWithID: entryID, urlString: urlString)
+    }
+
+    public func handlePluginHistoryReplaceEntry(entryID: UUID, urlString: String?) {
+        delegate?.outerframeView(self, didRequestHistoryReplaceEntryWithID: entryID, urlString: urlString)
+    }
+
+    public func handlePluginHistoryGo(delta: Int32) {
+        delegate?.outerframeView(self, didRequestHistoryGo: delta)
+    }
+
+    func handlePluginSetTitle(_ title: String?) {
+        delegate?.outerframeView(self, didSetTitle: title)
+    }
+
+    func handlePluginSetIcon(_ icon: OuterframePresentationIcon) {
+        delegate?.outerframeView(self, didSetIcon: resolvePresentationIcon(icon))
+    }
+
+    private func resolvePresentationIcon(_ icon: OuterframePresentationIcon) -> NSImage? {
+        switch icon {
+        case .none:
+            return nil
+        case .bundleResource(let path):
+            guard let presentationBundleURL,
+                  let url = resolvedPresentationURL(path: path,
+                                                    relativeTo: presentationBundleURL,
+                                                    allowAbsolutePath: false) else {
+                return nil
+            }
+            return NSImage(contentsOf: url)
+        case .stagedFile(let path):
+            guard let presentationStagingDirectoryURL,
+                  let url = resolvedPresentationURL(path: path,
+                                                    relativeTo: presentationStagingDirectoryURL,
+                                                    allowAbsolutePath: true) else {
+                return nil
+            }
+            return NSImage(contentsOf: url)
+        }
+    }
+
+    private func resolvedPresentationURL(path: String,
+                                         relativeTo rootURL: URL,
+                                         allowAbsolutePath: Bool) -> URL? {
+        let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPath.isEmpty,
+              !trimmedPath.contains("\0") else {
+            return nil
+        }
+
+        let candidateURL: URL
+        if trimmedPath.hasPrefix("/") {
+            guard allowAbsolutePath else { return nil }
+            candidateURL = URL(fileURLWithPath: trimmedPath)
+        } else {
+            candidateURL = rootURL.appendingPathComponent(trimmedPath)
+        }
+
+        let resolvedRoot = rootURL.resolvingSymlinksInPath().standardizedFileURL
+        let resolvedCandidate = candidateURL.resolvingSymlinksInPath().standardizedFileURL
+        let rootPath = resolvedRoot.path
+        let candidatePath = resolvedCandidate.path
+        guard candidatePath == rootPath || candidatePath.hasPrefix(rootPath + "/") else {
+            return nil
+        }
+        return resolvedCandidate
     }
 
     func outerframeContentConnectionDebuggerAttached(_ connection: OuterframeContentConnection) {
@@ -2484,17 +3737,46 @@ public final class OuterframeView: NSView, NSMenuItemValidation, NSServicesMenuR
         connection.requestPasteboardItemsForCopy(completion: completion)
     }
 
-    func requestAccessibilitySnapshot(completion: @escaping (OuterframeAccessibilitySnapshot?) -> Void) {
+    func requestPasteboardItemsForCut(completion: @escaping ([OuterframeContentPasteboardItem]?) -> Void) {
         guard pluginIsReady, let connection = outerframeContentConnection else {
             completion(nil)
             return
         }
-        connection.requestAccessibilitySnapshot(completion: completion)
+        connection.requestPasteboardItemsForCut(completion: completion)
     }
 
     func sendPasteboardItemsForPaste(_ items: [OuterframeContentPasteboardItem]) {
         withActivePluginConnection { connection in
             connection.sendPasteboardItemsForPaste(items)
+        }
+    }
+
+    public func acceptHistoryEntry(entryID: UUID, url: URL) {
+        withActivePluginConnection { connection in
+            connection.sendHistoryEntryAccepted(entryID: entryID, urlString: url.absoluteString)
+        }
+    }
+
+    public func rejectHistoryEntry(entryID: UUID, errorMessage: String) {
+        withActivePluginConnection { connection in
+            connection.sendHistoryEntryRejected(entryID: entryID, errorMessage: errorMessage)
+        }
+    }
+
+    public func sendHistoryTraversal(entryID: UUID, url: URL) {
+        withActivePluginConnection { connection in
+            connection.sendHistoryTraversal(entryID: entryID, urlString: url.absoluteString)
+        }
+    }
+
+    public func sendHistoryContextUpdate(currentEntryID: UUID, url: URL, length: Int, canGoBack: Bool, canGoForward: Bool) {
+        withActivePluginConnection { connection in
+            let clampedLength = UInt32(min(max(length, 0), Int(UInt32.max)))
+            connection.sendHistoryContextUpdate(currentEntryID: currentEntryID,
+                                                urlString: url.absoluteString,
+                                                length: clampedLength,
+                                                canGoBack: canGoBack,
+                                                canGoForward: canGoForward)
         }
     }
 
@@ -2526,6 +3808,7 @@ private final class PendingDebugLoad {
     let bundleURLString: String
     let width: CGFloat
     let height: CGFloat
+    let historyEntryID: UUID?
     var debuggerAttached: Bool
     var continuation: CheckedContinuation<Void, Error>?
 
@@ -2536,6 +3819,7 @@ private final class PendingDebugLoad {
          bundleURLString: String,
          width: CGFloat,
          height: CGFloat,
+         historyEntryID: UUID?,
          debuggerAttached: Bool,
          continuation: CheckedContinuation<Void, Error>) {
         self.connection = connection
@@ -2545,6 +3829,7 @@ private final class PendingDebugLoad {
         self.bundleURLString = bundleURLString
         self.width = width
         self.height = height
+        self.historyEntryID = historyEntryID
         self.debuggerAttached = debuggerAttached
         self.continuation = continuation
     }

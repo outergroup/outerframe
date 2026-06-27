@@ -28,8 +28,10 @@ public class OuterframeProcesses: NSObject, OuterframeProcessesProtocol {
     /// Monitors for process exit to clean up instance mappings
     private var processMonitors: [UUID: DispatchSourceProcess] = [:]
     private let instanceLock = NSLock()
+    private let bundleExtractionQueue = DispatchQueue(label: "org.outerframe.outerframe.bundle-extraction")
 
     public func launchOuterframeContent(networkProxyPort: UInt16,
+                                        stagedFileDirectoryPath: String,
                                         with reply: @escaping (FileHandle?, FileHandle?, FileHandle?, FileHandle?, pid_t, UUID?, NSError?) -> Void) {
         do {
             guard let executablePath = getOuterframeContentExecutablePath() else {
@@ -107,6 +109,14 @@ public class OuterframeProcesses: NSObject, OuterframeProcessesProtocol {
             if childPluginFlags != -1 {
                 _ = fcntl(childPluginFD, F_SETFD, childPluginFlags & ~FD_CLOEXEC)
             }
+            let parentInfraFlags = fcntl(parentInfraFD, F_GETFD)
+            if parentInfraFlags != -1 {
+                _ = fcntl(parentInfraFD, F_SETFD, parentInfraFlags | FD_CLOEXEC)
+            }
+            let parentPluginFlags = fcntl(parentPluginFD, F_GETFD)
+            if parentPluginFlags != -1 {
+                _ = fcntl(parentPluginFD, F_SETFD, parentPluginFlags | FD_CLOEXEC)
+            }
             let stdoutReadFlags = fcntl(stdoutReadFD, F_GETFD)
             if stdoutReadFlags != -1 {
                 _ = fcntl(stdoutReadFD, F_SETFD, stdoutReadFlags | FD_CLOEXEC)
@@ -117,12 +127,15 @@ public class OuterframeProcesses: NSObject, OuterframeProcessesProtocol {
             }
 
             let pid = try launchOuterframeContentProcess(executablePath: executablePath,
+                                                         parentInfrastructureSocketFD: parentInfraFD,
                                                          infrastructureSocketFD: childInfraFD,
+                                                         parentPluginSocketFD: parentPluginFD,
                                                          pluginSocketFD: childPluginFD,
                                                          stdoutFD: stdoutWriteFD,
                                                          stderrFD: stderrWriteFD,
                                                          networkProxyPort: networkProxyPort,
-                                                         hostBundleIdentifier: hostBundleIdentifier)
+                                                         hostBundleIdentifier: hostBundleIdentifier,
+                                                         stagedFileDirectoryPath: stagedFileDirectoryPath)
             close(childInfraFD)
             childInfraFD = -1
             close(childPluginFD)
@@ -169,12 +182,15 @@ public class OuterframeProcesses: NSObject, OuterframeProcessesProtocol {
     }
 
     private func launchOuterframeContentProcess(executablePath: String,
+                                                parentInfrastructureSocketFD: Int32,
                                                 infrastructureSocketFD: Int32,
+                                                parentPluginSocketFD: Int32,
                                                 pluginSocketFD: Int32,
                                                 stdoutFD: Int32,
                                                 stderrFD: Int32,
                                                 networkProxyPort: UInt16,
-                                                hostBundleIdentifier: String) throws -> pid_t {
+                                                hostBundleIdentifier: String,
+                                                stagedFileDirectoryPath: String) throws -> pid_t {
         var pid: pid_t = 0
 
         var fileActions: posix_spawn_file_actions_t? = nil
@@ -190,6 +206,16 @@ public class OuterframeProcesses: NSObject, OuterframeProcessesProtocol {
         guard posix_spawn_file_actions_addinherit_np(&fileActions, pluginSocketFD) == 0 else {
             posix_spawn_file_actions_destroy(&fileActions)
             throw OuterframeProcessesError.posixFailure(code: errno, context: "posix_spawn_file_actions_addinherit_np (plugin)")
+        }
+
+        guard posix_spawn_file_actions_addclose(&fileActions, parentInfrastructureSocketFD) == 0 else {
+            posix_spawn_file_actions_destroy(&fileActions)
+            throw OuterframeProcessesError.posixFailure(code: errno, context: "posix_spawn_file_actions_addclose (parent infra)")
+        }
+
+        guard posix_spawn_file_actions_addclose(&fileActions, parentPluginSocketFD) == 0 else {
+            posix_spawn_file_actions_destroy(&fileActions)
+            throw OuterframeProcessesError.posixFailure(code: errno, context: "posix_spawn_file_actions_addclose (parent plugin)")
         }
 
         guard posix_spawn_file_actions_adddup2(&fileActions, stdoutFD, STDOUT_FILENO) == 0 else {
@@ -215,7 +241,8 @@ public class OuterframeProcesses: NSObject, OuterframeProcessesProtocol {
                     "--infra-socket-fd", "\(infrastructureSocketFD)",
                     "--plugin-socket-fd", "\(pluginSocketFD)",
                     "--network-proxy-port", "\(networkProxyPort)",
-                    "--host-bundle-id", hostBundleIdentifier]
+                    "--host-bundle-id", hostBundleIdentifier,
+                    "--staged-file-directory", stagedFileDirectoryPath]
         var cArgs: [UnsafeMutablePointer<CChar>?] = args.map { strdup($0) }
         cArgs.append(nil)
         defer {
@@ -348,10 +375,19 @@ public class OuterframeProcesses: NSObject, OuterframeProcessesProtocol {
                 return
             }
 
+            guard let self else {
+                let error = NSError(domain: "OuterframeProcesses",
+                                    code: 22,
+                                    userInfo: [NSLocalizedDescriptionKey: "Outerframe process service is unavailable"])
+                reply(nil, error)
+                return
+            }
+
+            self.bundleExtractionQueue.async {
             do {
                 let fm = FileManager.default
                 if delegate.didUseLocalCache,
-                   let bundleURL = self?.findBundle(in: destinationURL) {
+                   let bundleURL = self.findBundle(in: destinationURL) {
                     reply(bundleURL, nil)
                     return
                 }
@@ -375,8 +411,8 @@ public class OuterframeProcesses: NSObject, OuterframeProcessesProtocol {
                 let shouldTreatAsArchive = archiveBasedExtensions.contains(fileExtension) || fileExtension.isEmpty
 
                 if shouldTreatAsArchive {
-                    try self?.extractAppleArchive(at: archiveURL, into: destinationURL)
-                    if let bundleURL = self?.findBundle(in: destinationURL) {
+                    try self.extractAppleArchive(at: archiveURL, into: destinationURL)
+                    if let bundleURL = self.findBundle(in: destinationURL) {
                         reply(bundleURL, nil)
                         return
                     }
@@ -394,6 +430,7 @@ public class OuterframeProcesses: NSObject, OuterframeProcessesProtocol {
                 reply(nil, error)
             } catch {
                 reply(nil, error as NSError)
+            }
             }
         }
         task.resume()
@@ -420,16 +457,13 @@ public class OuterframeProcesses: NSObject, OuterframeProcessesProtocol {
         instanceLock.unlock()
     }
 
-    public func ensureOuterframeContentExits(instanceId: UUID, timeout: TimeInterval, with reply: @escaping (NSError?) -> Void) {
+    public func ensureOuterframeContentExits(instanceId: UUID, timeout: TimeInterval, with reply: @escaping (Bool, NSError?) -> Void) {
         instanceLock.lock()
         guard let pid = outerframeContentInstances.removeValue(forKey: instanceId) else {
             instanceLock.unlock()
-            // Instance not found - either already exited and cleaned up, or invalid ID
-            // Either way, not an error from the caller's perspective
-            reply(nil)
+            reply(false, nil)
             return
         }
-        // Cancel the process monitor since we're taking over
         processMonitors.removeValue(forKey: instanceId)?.cancel()
         instanceLock.unlock()
 
@@ -458,7 +492,7 @@ public class OuterframeProcesses: NSObject, OuterframeProcessesProtocol {
                     break
                 }
             }
-            reply(nil)
+            reply(true, nil)
         }
     }
 
@@ -554,12 +588,8 @@ public class OuterframeProcesses: NSObject, OuterframeProcessesProtocol {
 
         return URL(fileURLWithPath: homeDirectory, isDirectory: true)
             .appendingPathComponent("Library", isDirectory: true)
-            .appendingPathComponent("Containers", isDirectory: true)
+            .appendingPathComponent("Caches", isDirectory: true)
             .appendingPathComponent(cacheBundleIdentifier, isDirectory: true)
-            .appendingPathComponent("Data", isDirectory: true)
-            .appendingPathComponent("Library", isDirectory: true)
-            .appendingPathComponent(cacheBundleIdentifier, isDirectory: true)
-            .appendingPathComponent("Cache", isDirectory: true)
             .appendingPathComponent("OuterframeBundleCache", isDirectory: true)
     }
 

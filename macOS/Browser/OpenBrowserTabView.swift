@@ -13,14 +13,18 @@ private final class OpenBrowserPlaceholderView: NSView {
 }
 
 final class OpenBrowserTabView: NSView {
+    private static let standaloneServerID = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+
     weak var delegate: OpenBrowserTabDelegate?
 
     private var webView: WKWebView?
     private var outerframeView: OuterframeView?
     private var placeholderView: NSView?
     private var loadGeneration = 0
-    private var history: [URL] = []
+    private var history: [HistoryEntry] = []
     private var historyIndex = -1
+    private var activeOuterframeSessionID: UUID?
+    private var activeOuterframeCommittedURL: URL?
     private var title: String?
     private var urlObservation: NSKeyValueObservation?
     private var titleObservation: NSKeyValueObservation?
@@ -32,7 +36,7 @@ final class OpenBrowserTabView: NSView {
 
     var currentURL: URL? {
         guard history.indices.contains(historyIndex) else { return webView?.url }
-        return history[historyIndex]
+        return history[historyIndex].url
     }
 
     var canGoBack: Bool {
@@ -77,8 +81,7 @@ final class OpenBrowserTabView: NSView {
 
     func goBack() {
         if historyIndex > 0 {
-            historyIndex -= 1
-            load(history[historyIndex], addingToHistory: false)
+            navigateToHistoryEntry(at: historyIndex - 1)
             return
         }
 
@@ -89,8 +92,7 @@ final class OpenBrowserTabView: NSView {
 
     func goForward() {
         if historyIndex >= 0, historyIndex < history.count - 1 {
-            historyIndex += 1
-            load(history[historyIndex], addingToHistory: false)
+            navigateToHistoryEntry(at: historyIndex + 1)
             return
         }
 
@@ -110,12 +112,48 @@ final class OpenBrowserTabView: NSView {
         }
     }
 
+    private func navigateToHistoryEntry(at index: Int) {
+        guard history.indices.contains(index) else { return }
+        let entry = history[index]
+
+        if canTraverseLiveOuterframe(to: entry) {
+            historyIndex = index
+            delegate?.browserTab(self, didUpdateURL: entry.url)
+            delegate?.browserTabDidUpdateNavigationState(self)
+            outerframeView?.sendHistoryTraversal(entryID: entry.historyEntryID, url: entry.url)
+            sendOuterframeHistoryContextUpdate()
+            return
+        }
+
+        historyIndex = index
+        load(entry.url, addingToHistory: false)
+    }
+
+    private func canTraverseLiveOuterframe(to entry: HistoryEntry) -> Bool {
+        guard let outerframeView,
+              outerframeView.superview === self,
+              let activeOuterframeSessionID else {
+            return false
+        }
+        return entry.outerframeSessionID == activeOuterframeSessionID
+    }
+
+    private func currentHistoryEntryID() -> UUID? {
+        guard history.indices.contains(historyIndex) else { return nil }
+        return history[historyIndex].historyEntryID
+    }
+
+    private func markCurrentHistoryEntryAsOuterframe(sessionID: UUID) {
+        guard history.indices.contains(historyIndex) else { return }
+        history[historyIndex].outerframeSessionID = sessionID
+    }
+
     private func load(_ url: URL, addingToHistory: Bool) {
         if addingToHistory {
             if historyIndex < history.count - 1 {
                 history.removeSubrange((historyIndex + 1)..<history.count)
             }
-            history.append(url)
+            history.append(HistoryEntry(url: url, historyEntryID: UUID(), outerframeSessionID: nil))
             historyIndex = history.count - 1
         }
 
@@ -188,15 +226,20 @@ final class OpenBrowserTabView: NSView {
         let candidate = OuterframeView(frame: bounds)
         candidate.autoresizingMask = [.width, .height]
         candidate.delegate = self
+        let sessionID = UUID()
+        let historyEntryID = currentHistoryEntryID()
 
         var pendingRegistrationIDs: [UInt32] = []
         do {
             let proxyRegistration = try await registerOuterframeProxyOrigin(for: url)
             pendingRegistrationIDs = proxyRegistration.registrationIDs
+            let storageContext = try makeOuterframeStorageContext(for: url)
             let result = try await candidate.loadOuterframeContent(from: url,
                                                                    networkProxyEndpoint: proxyRegistration.endpoint,
+                                                                   storageContext: storageContext,
                                                                    cacheContext: nil,
-                                                                   bypassCache: false)
+                                                                   bypassCache: false,
+                                                                   historyEntryID: historyEntryID)
             guard loadGeneration == generation else {
                 await unregisterOuterframeProxyOrigins(ids: proxyRegistration.registrationIDs)
                 await candidate.shutdownOuterframeContent()
@@ -207,8 +250,10 @@ final class OpenBrowserTabView: NSView {
             case .loaded:
                 activeOuterframeProxyRegistrationIDs = proxyRegistration.registrationIDs
                 pendingRegistrationIDs = []
-                showOuterframe(candidate)
+                markCurrentHistoryEntryAsOuterframe(sessionID: sessionID)
+                showOuterframe(candidate, sessionID: sessionID, committedURL: url)
                 delegate?.browserTab(self, didUpdateProgress: nil)
+                sendOuterframeHistoryContextUpdate()
             case .notOuterframe:
                 await unregisterOuterframeProxyOrigins(ids: proxyRegistration.registrationIDs)
                 await candidate.shutdownOuterframeContent()
@@ -331,6 +376,29 @@ final class OpenBrowserTabView: NSView {
         return (scheme, host, port)
     }
 
+    private func makeOuterframeStorageContext(for url: URL) throws -> OuterframeStorageContext {
+        let serverTemporaryDirectoryURL = try Self.createServerTemporaryDirectory(for: Self.standaloneServerID)
+        let originIdentifier: String
+        if let origin = originParts(from: url) {
+            originIdentifier = "\(origin.scheme)://\(origin.host.lowercased()):\(origin.port)"
+        } else {
+            originIdentifier = url.absoluteString
+        }
+        return OuterframeStorageContext(serverTemporaryDirectoryURL: serverTemporaryDirectoryURL,
+                                        originIdentifier: originIdentifier)
+    }
+
+    private static func createServerTemporaryDirectory(for serverID: UUID) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("org.outerframe.OpenBrowser", isDirectory: true)
+            .appendingPathComponent("servers", isDirectory: true)
+            .appendingPathComponent(serverID.uuidString.lowercased(), isDirectory: true)
+
+        try FileManager.default.createDirectory(at: directory,
+                                                withIntermediateDirectories: true)
+        return directory.resolvingSymlinksInPath()
+    }
+
     private func explicitOrDefaultPort(for url: URL) -> UInt16? {
         if let port = url.port {
             return UInt16(exactly: port)
@@ -431,8 +499,10 @@ final class OpenBrowserTabView: NSView {
         return webView
     }
 
-    private func showOuterframe(_ view: OuterframeView) {
+    private func showOuterframe(_ view: OuterframeView, sessionID: UUID, committedURL: URL) {
         outerframeView = view
+        activeOuterframeSessionID = sessionID
+        activeOuterframeCommittedURL = committedURL
         showContentView(view)
     }
 
@@ -443,6 +513,8 @@ final class OpenBrowserTabView: NSView {
         if outerframeView.map({ $0 === view }) != true {
             let previousOuterframe = outerframeView
             outerframeView = nil
+            activeOuterframeSessionID = nil
+            activeOuterframeCommittedURL = nil
             if let previousOuterframe {
                 Task { @MainActor in
                     await previousOuterframe.shutdownOuterframeContent()
@@ -459,6 +531,71 @@ final class OpenBrowserTabView: NSView {
         }
         view.frame = bounds
         view.autoresizingMask = [.width, .height]
+    }
+
+    private func sendOuterframeHistoryContextUpdate() {
+        guard let outerframeView,
+              outerframeView.superview === self,
+              history.indices.contains(historyIndex) else {
+            return
+        }
+
+        let entry = history[historyIndex]
+        outerframeView.sendHistoryContextUpdate(currentEntryID: entry.historyEntryID,
+                                                url: entry.url,
+                                                length: history.count,
+                                                canGoBack: canGoBack,
+                                                canGoForward: canGoForward)
+    }
+
+    private func historyEntryIDIsAvailable(_ entryID: UUID, replacingCurrentEntry: Bool) -> Bool {
+        for (index, entry) in history.enumerated() where entry.historyEntryID == entryID {
+            if replacingCurrentEntry && index == historyIndex {
+                continue
+            }
+            return false
+        }
+        return true
+    }
+
+    private func resolveOuterframeHistoryURL(_ urlString: String?) throws -> URL {
+        guard let activeOuterframeCommittedURL else {
+            throw OpenBrowserHistoryError.noActiveOuterframe
+        }
+
+        let baseURL = currentURL ?? activeOuterframeCommittedURL
+        let resolvedURL: URL
+        if let urlString, !urlString.isEmpty {
+            if let absoluteURL = URL(string: urlString), absoluteURL.scheme != nil {
+                resolvedURL = absoluteURL
+            } else if let relativeURL = URL(string: urlString, relativeTo: baseURL)?.absoluteURL {
+                resolvedURL = relativeURL
+            } else {
+                throw OpenBrowserHistoryError.invalidURL
+            }
+        } else {
+            resolvedURL = baseURL
+        }
+
+        guard isHistoryURL(resolvedURL, allowedForOuterframeCommittedURL: activeOuterframeCommittedURL) else {
+            throw OpenBrowserHistoryError.crossOriginURL
+        }
+        return resolvedURL
+    }
+
+    private func isHistoryURL(_ url: URL, allowedForOuterframeCommittedURL committedURL: URL) -> Bool {
+        if committedURL.isFileURL || url.isFileURL {
+            return committedURL.isFileURL && url.isFileURL && committedURL.path == url.path
+        }
+
+        guard let committedOrigin = originParts(from: committedURL),
+              let candidateOrigin = originParts(from: url) else {
+            return false
+        }
+
+        return committedOrigin.scheme == candidateOrigin.scheme
+            && committedOrigin.host.lowercased() == candidateOrigin.host.lowercased()
+            && committedOrigin.port == candidateOrigin.port
     }
 
     private func showEmptyPage() {
@@ -511,6 +648,12 @@ final class OpenBrowserTabView: NSView {
     }
 }
 
+private struct HistoryEntry {
+    var url: URL
+    var historyEntryID: UUID
+    var outerframeSessionID: UUID?
+}
+
 private struct OriginKey: Hashable {
     let scheme: String
     let host: String
@@ -524,6 +667,23 @@ private enum OpenBrowserProxyError: Error, LocalizedError {
         switch self {
         case .invalidOrigin:
             return "Unable to register a network proxy origin for this Outerframe URL."
+        }
+    }
+}
+
+private enum OpenBrowserHistoryError: Error, LocalizedError {
+    case noActiveOuterframe
+    case invalidURL
+    case crossOriginURL
+
+    var errorDescription: String? {
+        switch self {
+        case .noActiveOuterframe:
+            return "There is no active Outerframe content for this history entry."
+        case .invalidURL:
+            return "The requested history URL is invalid."
+        case .crossOriginURL:
+            return "Outerframe history URLs must stay in the loaded document's origin."
         }
     }
 }
@@ -606,6 +766,83 @@ extension OpenBrowserTabView: OuterframeViewDelegate {
                         preferredSize: CGSize?) {
         guard let url = URL(string: urlString) else { return }
         delegate?.browserTab(self, didRequestOpenURL: url)
+    }
+
+    func outerframeView(_ view: OuterframeView, didRequestNavigateToURLString urlString: String) {
+        guard view === outerframeView, let url = URL(string: urlString) else { return }
+        load(url)
+    }
+
+    func outerframeView(_ view: OuterframeView,
+                        didRequestOpenTabWithURLString urlString: String,
+                        displayString: String?) {
+        guard view === outerframeView, let url = URL(string: urlString) else { return }
+        delegate?.browserTab(self, didRequestOpenURL: url)
+    }
+
+    func outerframeView(_ view: OuterframeView, didRequestHistoryPushEntryWithID entryID: UUID, urlString: String?) {
+        guard view === outerframeView, let activeOuterframeSessionID else { return }
+        guard historyEntryIDIsAvailable(entryID, replacingCurrentEntry: false) else {
+            view.rejectHistoryEntry(entryID: entryID, errorMessage: "History entry ID is already in use.")
+            return
+        }
+
+        let resolvedURL: URL
+        do {
+            resolvedURL = try resolveOuterframeHistoryURL(urlString)
+        } catch {
+            view.rejectHistoryEntry(entryID: entryID, errorMessage: error.localizedDescription)
+            return
+        }
+
+        if historyIndex < history.count - 1 {
+            history.removeSubrange((historyIndex + 1)..<history.count)
+        }
+        history.append(HistoryEntry(url: resolvedURL,
+                                    historyEntryID: entryID,
+                                    outerframeSessionID: activeOuterframeSessionID))
+        historyIndex = history.count - 1
+
+        delegate?.browserTab(self, didUpdateURL: resolvedURL)
+        delegate?.browserTabDidUpdateNavigationState(self)
+        view.acceptHistoryEntry(entryID: entryID, url: resolvedURL)
+        sendOuterframeHistoryContextUpdate()
+    }
+
+    func outerframeView(_ view: OuterframeView, didRequestHistoryReplaceEntryWithID entryID: UUID, urlString: String?) {
+        guard view === outerframeView, let activeOuterframeSessionID else { return }
+        guard history.indices.contains(historyIndex) else {
+            view.rejectHistoryEntry(entryID: entryID, errorMessage: "There is no current history entry to replace.")
+            return
+        }
+        guard historyEntryIDIsAvailable(entryID, replacingCurrentEntry: true) else {
+            view.rejectHistoryEntry(entryID: entryID, errorMessage: "History entry ID is already in use.")
+            return
+        }
+
+        let resolvedURL: URL
+        do {
+            resolvedURL = try resolveOuterframeHistoryURL(urlString)
+        } catch {
+            view.rejectHistoryEntry(entryID: entryID, errorMessage: error.localizedDescription)
+            return
+        }
+
+        history[historyIndex] = HistoryEntry(url: resolvedURL,
+                                             historyEntryID: entryID,
+                                             outerframeSessionID: activeOuterframeSessionID)
+
+        delegate?.browserTab(self, didUpdateURL: resolvedURL)
+        delegate?.browserTabDidUpdateNavigationState(self)
+        view.acceptHistoryEntry(entryID: entryID, url: resolvedURL)
+        sendOuterframeHistoryContextUpdate()
+    }
+
+    func outerframeView(_ view: OuterframeView, didRequestHistoryGo delta: Int32) {
+        guard view === outerframeView else { return }
+        let targetIndex = historyIndex + Int(delta)
+        guard history.indices.contains(targetIndex) else { return }
+        navigateToHistoryEntry(at: targetIndex)
     }
 
     func outerframeViewDidResetOuterframeContentOutput(_ view: OuterframeView) {

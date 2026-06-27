@@ -2,14 +2,12 @@ import Cocoa
 import Outerframe
 
 @main
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @IBOutlet private var window: NSWindow?
 
     private var browserWindowControllers: [OpenBrowserWindowController] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        OuterframeConfiguration.processesXPCServiceName = "dev.outergroup.OuterframeProcesses"
-        OuterframeConfiguration.networkProxyXPCServiceName = "dev.outergroup.OuterframeNetworkProxy"
         OuterframeConfiguration.warmupXPCConnections()
 
         let controller: OpenBrowserWindowController
@@ -21,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         registerWindowController(controller)
         controller.showWindow(nil)
         setupFileMenuItems()
+        setupEditMenuItems()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -58,6 +57,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let newTabItem = setupNewTabMenuItem(in: fileMenu)
         clearDuplicateNewTabKeyEquivalents(except: newTabItem, in: NSApp.mainMenu)
         setupOpenLocationMenuItem(in: fileMenu)
+    }
+
+    private func setupEditMenuItems() {
+        guard let editMenu = NSApp.mainMenu?.item(withTitle: "Edit")?.submenu else { return }
+        editMenu.delegate = self
+        pruneUnsupportedEditMenuItems(in: editMenu)
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        if menu.title == "Edit" {
+            pruneUnsupportedEditMenuItems(in: menu)
+        }
+    }
+
+    private func pruneUnsupportedEditMenuItems(in menu: NSMenu) {
+        let unsupportedTitles: Set<String> = [
+            "Writing Tools",
+            "Spelling and Grammar",
+            "Substitutions",
+            "Transformations",
+            "Speech",
+            "AutoFill"
+        ]
+        for item in menu.items where unsupportedTitles.contains(item.title) {
+            menu.removeItem(item)
+        }
+        while menu.items.last?.isSeparatorItem == true {
+            menu.removeItem(at: menu.items.count - 1)
+        }
     }
 
     private func setupNewTabMenuItem(in fileMenu: NSMenu) -> NSMenuItem? {

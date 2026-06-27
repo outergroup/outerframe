@@ -38,16 +38,53 @@ public enum OuterframeNetworkProxyConnectionError: Error {
 public final class OuterframeNetworkProxyConnection: NSObject {
     public static let shared = OuterframeNetworkProxyConnection()
 
-    private nonisolated(unsafe) static let xpcConnection: NSXPCConnection = {
+    private nonisolated static let xpcConnectionLock = NSLock()
+    private nonisolated(unsafe) static var xpcConnectionStorage: NSXPCConnection?
+
+    private nonisolated(unsafe) static var xpcConnection: NSXPCConnection {
+        xpcConnectionLock.lock()
+        defer { xpcConnectionLock.unlock() }
+
+        if let xpcConnectionStorage {
+            return xpcConnectionStorage
+        }
+
+        let connection = makeXPCConnection()
+        xpcConnectionStorage = connection
+        return connection
+    }
+
+    private nonisolated static func makeXPCConnection() -> NSXPCConnection {
         let connection = NSXPCConnection(serviceName: OuterframeConfiguration.networkProxyXPCServiceName)
         connection.remoteObjectInterface = NSXPCInterface(with: OuterframeNetworkProxyProtocol.self)
+        connection.interruptionHandler = {
+            NSLog("OuterframeNetworkProxyConnection: XPC connection interrupted")
+            Task { @MainActor in
+                OuterframeNetworkProxyConnection.shared.handleXPCConnectionEnded()
+            }
+        }
+        connection.invalidationHandler = {
+            NSLog("OuterframeNetworkProxyConnection: XPC connection invalidated")
+            xpcConnectionLock.lock()
+            if xpcConnectionStorage === connection {
+                xpcConnectionStorage = nil
+            }
+            xpcConnectionLock.unlock()
+            Task { @MainActor in
+                OuterframeNetworkProxyConnection.shared.handleXPCConnectionEnded()
+            }
+        }
         connection.resume()
         return connection
-    }()
+    }
 
     private var listeningPort: UInt16?
     private var nextRegistrationID = OuterframeNetworkProxyConnection.makeInitialRegistrationID()
     private var allocatedRegistrationIDs = Set<UInt32>()
+
+    private func handleXPCConnectionEnded() {
+        listeningPort = nil
+    }
 
     public nonisolated static func warmup() {
         if let proxy = xpcConnection.remoteObjectProxy as? OuterframeNetworkProxyProtocol {

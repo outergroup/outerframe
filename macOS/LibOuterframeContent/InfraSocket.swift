@@ -39,7 +39,7 @@ actor InfraSocket {
     nonisolated(unsafe) weak var outerlayerHost: OuterlayerHost?
 
     init() {
-        queue = DispatchQueue(label: "dev.outergroup.outerframecontent.socket.child") as! DispatchSerialQueue
+        queue = DispatchQueue(label: "org.outerframe.outerframecontent.socket.child") as! DispatchSerialQueue
     }
 
     func start(withFileDescriptor fd: Int32) {

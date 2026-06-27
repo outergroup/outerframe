@@ -86,19 +86,61 @@ struct OuterframeContentInputMode: OptionSet, Sendable {
     var allowsRawKeys: Bool { contains(.rawKeys) }
 }
 
-/// Describes whether the plugin can currently satisfy copy/paste commands.
-struct OuterframeContentEditingCapabilities: Sendable {
-    var canCopy: Bool
-    var canCut: Bool
-    var acceptablePasteboardTypeIdentifiers: [String]
+private final class OuterframeSynchronousReplyBox<T>: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var value: T?
 
-    init(canCopy: Bool,
-         canCut: Bool,
-         acceptablePasteboardTypeIdentifiers: [String]) {
-        self.canCopy = canCopy
-        self.canCut = canCut
-        self.acceptablePasteboardTypeIdentifiers = acceptablePasteboardTypeIdentifiers
+    func resume(_ value: T) {
+        condition.lock()
+        self.value = value
+        condition.broadcast()
+        condition.unlock()
     }
+
+    func wait(until deadline: Date) -> T? {
+        condition.lock()
+        defer { condition.unlock() }
+
+        while value == nil {
+            if !condition.wait(until: deadline) {
+                break
+            }
+        }
+        return value
+    }
+}
+
+private final class OuterframeSynchronousReplyRegistry<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var boxes: [UUID: OuterframeSynchronousReplyBox<T>] = [:]
+
+    func register(_ requestID: UUID) -> OuterframeSynchronousReplyBox<T> {
+        let box = OuterframeSynchronousReplyBox<T>()
+        lock.lock()
+        boxes[requestID] = box
+        lock.unlock()
+        return box
+    }
+
+    func remove(_ requestID: UUID) {
+        lock.lock()
+        boxes.removeValue(forKey: requestID)
+        lock.unlock()
+    }
+
+    func resume(requestID: UUID, value: T) -> Bool {
+        lock.lock()
+        let box = boxes.removeValue(forKey: requestID)
+        lock.unlock()
+
+        guard let box else { return false }
+        box.resume(value)
+        return true
+    }
+}
+
+private struct OuterframeAccessibilitySnapshotReply: Sendable {
+    let snapshotData: Data?
 }
 
 
@@ -109,11 +151,30 @@ protocol OuterframeContentConnectionDelegate: AnyObject {
     func updateCursor(_ cursorType: PluginCursorType)
     func setInputMode(_ inputMode: OuterframeContentInputMode)
     func showPluginRequestedContextMenu(attributedText: NSAttributedString, at location: CGPoint)
+    func showPluginRequestedContextMenuItems(menuID: UUID,
+                                             attributedText: NSAttributedString?,
+                                             items: [OuterframeContextMenuItem],
+                                             at location: CGPoint)
     func showPluginRequestedDefinition(attributedText: NSAttributedString, at location: CGPoint)
-    func handleTextCursorUpdate(cursors: [OuterframeContentTextCursorSnapshot])
+    func handleTextInputGeometryUpdate(_ geometry: OuterframeContentTextInputGeometry?)
     func handleAccessibilityTreeChanged(notificationMask: UInt8)
     func handlePluginOpenNewWindow(urlString: String, displayString: String?, preferredSize: CGSize?)
-    func setPasteboardCapabilities(canCopy: Bool, canCut: Bool, pasteboardTypeIdentifiers: [String])
+    func handlePluginNavigate(urlString: String)
+    func handlePluginOpenNewTab(urlString: String, displayString: String?)
+    func handlePluginHistoryPushEntry(entryID: UUID, urlString: String?)
+    func handlePluginHistoryReplaceEntry(entryID: UUID, urlString: String?)
+    func handlePluginHistoryGo(delta: Int32)
+    func handlePluginSetTitle(_ title: String?)
+    func handlePluginSetIcon(_ icon: OuterframePresentationIcon)
+    func setPasteboardDropBehaviorUniform(_ pasteboardTypeIdentifiers: [String])
+    func setAcceptedPasteboardPasteTypes(_ pasteboardTypeIdentifiers: [String])
+    func setPasteboardDropBehaviorHitTest()
+    func handlePasteboardAccessRequest(requestID: UUID,
+                                       operation: OuterframePasteboardAccessOperation,
+                                       pasteboardTypeIdentifiers: [String],
+                                       items: [OuterframeContentPasteboardItem])
+    func beginDraggingPasteboardItems(_ items: [OuterframeContentDraggingItem], operationMask: UInt32)
+    func releaseDroppedFileAccess(accessID: UUID)
     func outerframeContentConnectionDebuggerAttached(_ connection: OuterframeContentConnection)
     func outerframeContentConnectionDidTimeoutWaitingForPluginLoaded(_ connection: OuterframeContentConnection)
     func outerframeContentConnection(_ connection: OuterframeContentConnection, didReceiveStdout text: String)
@@ -121,29 +182,70 @@ protocol OuterframeContentConnectionDelegate: AnyObject {
     func performHapticFeedback(_ style: OuterframeHapticFeedbackStyle)
 }
 
+struct OuterframeFilePromiseWriteResult: Sendable {
+    let promiseID: UUID
+    let localPath: String
+    let deleteWhenDone: Bool
+}
+
 /// Manages the connection to OuterframeContent process
 @MainActor
 final class OuterframeContentConnection: NSObject {
-    private nonisolated(unsafe) static let outerframeProcessesConnection: NSXPCConnection = {
+    private nonisolated static let outerframeProcessesConnectionLock = NSLock()
+    private nonisolated(unsafe) static var outerframeProcessesConnectionStorage: NSXPCConnection?
+
+    private nonisolated(unsafe) static var outerframeProcessesConnection: NSXPCConnection {
+        outerframeProcessesConnectionLock.lock()
+        defer { outerframeProcessesConnectionLock.unlock() }
+
+        if let outerframeProcessesConnectionStorage {
+            return outerframeProcessesConnectionStorage
+        }
+
+        let connection = makeOuterframeProcessesConnection()
+        outerframeProcessesConnectionStorage = connection
+        return connection
+    }
+
+    private nonisolated static func makeOuterframeProcessesConnection() -> NSXPCConnection {
         let connection = NSXPCConnection(serviceName: OuterframeConfiguration.processesXPCServiceName)
         connection.remoteObjectInterface = NSXPCInterface(with: OuterframeProcessesProtocol.self)
+        connection.interruptionHandler = {
+            NSLog("OuterframeContentConnection: OuterframeProcesses XPC connection interrupted")
+        }
+        connection.invalidationHandler = {
+            NSLog("OuterframeContentConnection: OuterframeProcesses XPC connection invalidated")
+            outerframeProcessesConnectionLock.lock()
+            if outerframeProcessesConnectionStorage === connection {
+                outerframeProcessesConnectionStorage = nil
+            }
+            outerframeProcessesConnectionLock.unlock()
+        }
         connection.resume()
         return connection
-    }()
+    }
 
     override init() {
         super.init()
+        pluginSocket.immediateMessageHandler = { [weak self] messageData in
+            self?.handleImmediatePluginMessage(messageData) ?? false
+        }
     }
 
     /// Socket for infrastructure messages (loadPlugin, pluginLoaded, etc.)
-    private let infrastructureSocket = OuterframeContentSocket()
-    /// Socket for plugin messages (mouse, keyboard, display link, etc.)
-    let pluginSocket = OuterframeContentSocket()
+    private let infrastructureSocket = OuterframeContentSocket(label: "org.outerframe.outerframecontent.socket.infrastructure")
+    /// Socket for plugin messages (mouse, keyboard, display link, drag validation, etc.)
+    let pluginSocket = OuterframeContentSocket(label: "org.outerframe.outerframecontent.socket.plugin",
+                                               qos: .userInteractive)
     private var stdoutHandle: FileHandle?
     private var stderrHandle: FileHandle?
     private var outerframeContentPID: pid_t?
     private var outerframeContentInstanceId: UUID?
     private var outerframeContentTerminationSource: DispatchSourceProcess?
+    private var stagedFileDirectoryURL: URL?
+    var currentStagedFileDirectoryURL: URL? {
+        stagedFileDirectoryURL
+    }
     private var socketReady = false
     private var awaitingPluginLoaded = false
     private var pluginLoadedTimeoutTask: Task<Void, Never>?
@@ -159,7 +261,10 @@ final class OuterframeContentConnection: NSObject {
 
     // Store pending copy requests waiting on plugin response
     private var pendingCopyRequests: [UUID: ([OuterframeContentPasteboardItem]?) -> Void] = [:]
-    private var pendingAccessibilitySnapshotRequests: [UUID: (OuterframeAccessibilitySnapshot?) -> Void] = [:]
+    private var pendingFilePromiseWriteRequests: [UUID: @Sendable (Result<OuterframeFilePromiseWriteResult, Error>) -> Void] = [:]
+    private let editCommandValidationReplies = OuterframeSynchronousReplyRegistry<OuterframeEditCommandSet>()
+    private let pasteboardDropHitTestReplies = OuterframeSynchronousReplyRegistry<UInt32>()
+    private let accessibilitySnapshotReplies = OuterframeSynchronousReplyRegistry<OuterframeAccessibilitySnapshotReply>()
     private var unloadPluginRequestInFlight = false
     private var unloadPluginContinuations: [CheckedContinuation<Void, Error>] = []
     private var unloadPluginTimeoutTask: Task<Void, Never>?
@@ -176,7 +281,7 @@ final class OuterframeContentConnection: NSObject {
 
     private func failPendingLoadPluginRequests(with error: Error) {
         failPendingCopyRequests()
-        failPendingAccessibilityRequests()
+        failPendingFilePromiseWriteRequests(with: error)
         guard !loadPluginContinuations.isEmpty else { return }
         let continuations = loadPluginContinuations
         loadPluginContinuations.removeAll()
@@ -194,12 +299,29 @@ final class OuterframeContentConnection: NSObject {
         }
     }
 
-    private func failPendingAccessibilityRequests() {
-        guard !pendingAccessibilitySnapshotRequests.isEmpty else { return }
-        let requests = pendingAccessibilitySnapshotRequests
-        pendingAccessibilitySnapshotRequests.removeAll()
+    private func failPendingFilePromiseWriteRequests(with error: Error) {
+        guard !pendingFilePromiseWriteRequests.isEmpty else { return }
+        let requests = pendingFilePromiseWriteRequests
+        pendingFilePromiseWriteRequests.removeAll()
         for completion in requests.values {
-            completion(nil)
+            completion(.failure(error))
+        }
+    }
+
+    nonisolated private func handleImmediatePluginMessage(_ messageData: Data) -> Bool {
+        guard let message = try? ContentToBrowserMessage.decode(message: messageData) else {
+            return false
+        }
+        switch message {
+        case .editCommandValidationResponse(let requestID, let enabledCommands):
+            return editCommandValidationReplies.resume(requestID: requestID, value: enabledCommands)
+        case .pasteboardDropHitTestResponse(let requestID, let operationMask):
+            return pasteboardDropHitTestReplies.resume(requestID: requestID, value: operationMask)
+        case .accessibilitySnapshotResponse(let requestID, let snapshotData):
+            let reply = OuterframeAccessibilitySnapshotReply(snapshotData: snapshotData)
+            return accessibilitySnapshotReplies.resume(requestID: requestID, value: reply)
+        default:
+            return false
         }
     }
 
@@ -322,15 +444,19 @@ final class OuterframeContentConnection: NSObject {
         }
     }
 
-    func start(networkProxyEndpoint: OuterframeNetworkProxyEndpoint) async throws {
+    func start(networkProxyEndpoint: OuterframeNetworkProxyEndpoint,
+               storageContext: OuterframeStorageContext) async throws {
         let proxyPort = networkProxyEndpoint.port
+        let stagedFileDirectoryURL = try Self.createStagedFileDirectory(storageContext: storageContext)
         networkProxyPort = proxyPort
         proxyUsername = networkProxyEndpoint.username
         proxyPassword = networkProxyEndpoint.password
+        self.stagedFileDirectoryURL = stagedFileDirectoryURL
 
         do {
             let (infraHandle, pluginHandle, stdoutHandle, stderrHandle, pid, instanceId) = try await Self.launchOuterframeContentViaXPC(
-                networkProxyPort: proxyPort
+                networkProxyPort: proxyPort,
+                stagedFileDirectoryPath: stagedFileDirectoryURL.path
             )
             let infraFD = dup(infraHandle.fileDescriptor)
             let pluginFD = dup(pluginHandle.fileDescriptor)
@@ -371,6 +497,7 @@ final class OuterframeContentConnection: NSObject {
             socketReady = true
             print("Launched OuterframeContent process \(pid) via XPC")
         } catch {
+            self.stagedFileDirectoryURL = nil
             networkProxyPort = nil
             proxyUsername = nil
             proxyPassword = nil
@@ -381,20 +508,22 @@ final class OuterframeContentConnection: NSObject {
             socketReady = false
             failPendingLoadPluginRequests(with: error)
             failPendingCopyRequests()
-            failPendingAccessibilityRequests()
+            failPendingFilePromiseWriteRequests(with: error)
             failPendingUnloadPluginRequests(with: error)
             throw error
         }
     }
 
-    private nonisolated static func launchOuterframeContentViaXPC(networkProxyPort: UInt16) async throws -> (FileHandle, FileHandle, FileHandle, FileHandle, pid_t, UUID) {
+    private nonisolated static func launchOuterframeContentViaXPC(networkProxyPort: UInt16,
+                                                                  stagedFileDirectoryPath: String) async throws -> (FileHandle, FileHandle, FileHandle, FileHandle, pid_t, UUID) {
         try await withCheckedThrowingContinuation { continuation in
             guard let proxy = outerframeProcessesConnection.remoteObjectProxy as? OuterframeProcessesProtocol else {
                 continuation.resume(throwing: OuterframeContentConnectionError.posixFailure(code: -1, context: "XPC proxy creation"))
                 return
             }
 
-            proxy.launchOuterframeContent(networkProxyPort: networkProxyPort) { infraHandle, pluginHandle, stdoutHandle, stderrHandle, pid, instanceId, error in
+            proxy.launchOuterframeContent(networkProxyPort: networkProxyPort,
+                                          stagedFileDirectoryPath: stagedFileDirectoryPath) { infraHandle, pluginHandle, stdoutHandle, stderrHandle, pid, instanceId, error in
                 if let error {
                     continuation.resume(throwing: error)
                 } else if let infraHandle,
@@ -407,6 +536,65 @@ final class OuterframeContentConnection: NSObject {
                     continuation.resume(throwing: OuterframeContentConnectionError.posixFailure(code: -1, context: "XPC returned nil"))
                 }
             }
+        }
+    }
+
+    private nonisolated static func createStagedFileDirectory(storageContext: OuterframeStorageContext) throws -> URL {
+        let directoryURL = storageContext.serverTemporaryDirectoryURL
+            .appendingPathComponent("origins", isDirectory: true)
+            .appendingPathComponent(directoryName(forOriginIdentifier: storageContext.originIdentifier), isDirectory: true)
+            .appendingPathComponent("org.outerframe", isDirectory: true)
+        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        return canonicalFileURL(for: directoryURL)
+    }
+
+    private nonisolated static func directoryName(forOriginIdentifier originIdentifier: String) -> String {
+        let trimmed = originIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        let labelSource = trimmed.isEmpty ? "origin" : trimmed.lowercased()
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        var label = ""
+        var previousWasSeparator = false
+
+        for scalar in labelSource.unicodeScalars {
+            if allowed.contains(scalar) {
+                label.unicodeScalars.append(scalar)
+                previousWasSeparator = false
+            } else if !previousWasSeparator {
+                label.append("-")
+                previousWasSeparator = true
+            }
+            if label.count >= 48 {
+                break
+            }
+        }
+
+        label = label.trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
+        if label.isEmpty {
+            label = "origin"
+        }
+
+        return "\(label)-h-\(fnv1a64Hex(trimmed))"
+    }
+
+    private nonisolated static func fnv1a64Hex(_ string: String) -> String {
+        var hash: UInt64 = 0xcbf29ce484222325
+        for byte in string.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 0x100000001b3
+        }
+        return String(format: "%016llx", hash)
+    }
+
+    private nonisolated static func canonicalFileURL(for url: URL) -> URL {
+        let path = url.path
+        return path.withCString { pointer -> URL in
+            var resolved = [CChar](repeating: 0, count: Int(PATH_MAX))
+            if realpath(pointer, &resolved) != nil {
+                return resolved.withUnsafeBufferPointer { buffer in
+                    URL(fileURLWithPath: String(cString: buffer.baseAddress!), isDirectory: true)
+                }
+            }
+            return url
         }
     }
 
@@ -496,7 +684,8 @@ final class OuterframeContentConnection: NSObject {
                     outerURLString: String,
                     bundleURLString: String,
                     width: CGFloat,
-                    height: CGFloat) async throws {
+                    height: CGFloat,
+                    historyEntryID: UUID? = nil) async throws {
         let requestID = UUID()
 
         let proxyHost: String?
@@ -524,7 +713,8 @@ final class OuterframeContentConnection: NSObject {
             proxy: proxy,
             url: outerURLString,
             bundleUrl: bundleURLString,
-            windowIsActive: true
+            windowIsActive: true,
+            historyEntryID: historyEntryID
         )
         let initializeContentMessage = BrowserToContentMessage.initializeContent(args: initializeContentArguments)
 
@@ -688,13 +878,13 @@ final class OuterframeContentConnection: NSObject {
 
         let requestID = UUID()
         pendingCopyRequests[requestID] = completion
-        let message = BrowserToContentMessage.copySelectedPasteboardRequest(requestID: requestID)
+        let message = BrowserToContentMessage.selectionToPasteboardCopyRequest(requestID: requestID)
         let pluginSocket = self.pluginSocket
         Task {
             do {
                 try await pluginSocket.send(message.encode())
             } catch {
-                print("Browser: Failed to send copySelectedPasteboardRequest message: \(error)")
+                print("Browser: Failed to send selectionToPasteboardCopyRequest message: \(error)")
                 if let pending = self.pendingCopyRequests.removeValue(forKey: requestID) {
                     pending(nil)
                 }
@@ -702,33 +892,164 @@ final class OuterframeContentConnection: NSObject {
         }
     }
 
-    func requestAccessibilitySnapshot(completion: @escaping (OuterframeAccessibilitySnapshot?) -> Void) {
+    func requestPasteboardItemsForCut(completion: @escaping ([OuterframeContentPasteboardItem]?) -> Void) {
         guard socketReady else {
             completion(nil)
             return
         }
 
         let requestID = UUID()
-        pendingAccessibilitySnapshotRequests[requestID] = completion
-        let message = BrowserToContentMessage.accessibilitySnapshotRequest(requestID: requestID)
+        pendingCopyRequests[requestID] = completion
+        let message = BrowserToContentMessage.selectionToPasteboardCutRequest(requestID: requestID)
+        let pluginSocket = self.pluginSocket
+        Task {
+            do {
+                try await pluginSocket.send(message.encode())
+            } catch {
+                print("Browser: Failed to send selectionToPasteboardCutRequest message: \(error)")
+                if let pending = self.pendingCopyRequests.removeValue(forKey: requestID) {
+                    pending(nil)
+                }
+            }
+        }
+    }
+
+    func requestFilePromiseWrite(promiseID: UUID,
+                                 completion: @escaping @Sendable (Result<OuterframeFilePromiseWriteResult, Error>) -> Void) {
+        guard socketReady else {
+            completion(.failure(OuterframeContentConnectionError.disconnected))
+            return
+        }
+
+        let requestID = UUID()
+        pendingFilePromiseWriteRequests[requestID] = completion
+        let message = BrowserToContentMessage.filePromiseWriteRequest(requestID: requestID, promiseID: promiseID)
         let pluginSocket = self.pluginSocket
         Task { [weak self] in
             do {
                 try await pluginSocket.send(message.encode())
             } catch {
-                print("Browser: Failed to send accessibilitySnapshotRequest message: \(error)")
+                print("Browser: Failed to send filePromiseWriteRequest message: \(error)")
                 await MainActor.run {
                     guard let self else { return }
-                    if let pending = self.pendingAccessibilitySnapshotRequests.removeValue(forKey: requestID) {
-                        pending(nil)
+                    if let pending = self.pendingFilePromiseWriteRequests.removeValue(forKey: requestID) {
+                        pending(.failure(error))
                     }
                 }
             }
         }
     }
 
+    func sendHistoryEntryAccepted(entryID: UUID, urlString: String) {
+        sendToOuterframeContent(.historyEntryAccepted(entryID: entryID, url: urlString))
+    }
+
+    func sendHistoryEntryRejected(entryID: UUID, errorMessage: String) {
+        sendToOuterframeContent(.historyEntryRejected(entryID: entryID, errorMessage: errorMessage))
+    }
+
+    func sendHistoryTraversal(entryID: UUID, urlString: String) {
+        sendToOuterframeContent(.historyTraversal(entryID: entryID, url: urlString))
+    }
+
+    func sendHistoryContextUpdate(currentEntryID: UUID, urlString: String, length: UInt32, canGoBack: Bool, canGoForward: Bool) {
+        sendToOuterframeContent(.historyContextUpdate(currentEntryID: currentEntryID,
+                                                      url: urlString,
+                                                      length: length,
+                                                      canGoBack: canGoBack,
+                                                      canGoForward: canGoForward))
+    }
+
     func sendPasteboardItemsForPaste(_ items: [OuterframeContentPasteboardItem]) {
-        sendToOuterframeContent(.pasteboardContentDelivered(items: items))
+        sendToOuterframeContent(.pasteboardContentPasted(items: items))
+    }
+
+    func sendPasteboardItemsForDrop(_ items: [OuterframeContentPasteboardItem], at point: CGPoint) {
+        sendToOuterframeContent(.pasteboardContentDropped(point: point, items: items))
+    }
+
+    func validateEditCommandsSynchronously(_ commands: OuterframeEditCommandSet,
+                                           timeoutMilliseconds: UInt32) -> OuterframeEditCommandSet? {
+        guard socketReady else { return nil }
+
+        let requestID = UUID()
+        let replyBox = editCommandValidationReplies.register(requestID)
+        let message = BrowserToContentMessage.editCommandValidationRequest(requestID: requestID,
+                                                                           commands: commands)
+        do {
+            try pluginSocket.sendBlocking(message.encode())
+        } catch {
+            editCommandValidationReplies.remove(requestID)
+            print("Browser: Failed to send editCommandValidationRequest message: \(error)")
+            return nil
+        }
+
+        let timeout = max(TimeInterval(timeoutMilliseconds) / 1000, 0.001)
+        guard let result = replyBox.wait(until: Date(timeIntervalSinceNow: timeout)) else {
+            editCommandValidationReplies.remove(requestID)
+            return nil
+        }
+        return result
+    }
+
+    func validatePasteboardDropSynchronously(point: CGPoint,
+                                             pasteboardTypes: [String],
+                                             operationMask: UInt32,
+                                             modifierFlags: UInt64,
+                                             timeoutMilliseconds: UInt32) -> UInt32? {
+        guard socketReady else { return nil }
+
+        let requestID = UUID()
+        let replyBox = pasteboardDropHitTestReplies.register(requestID)
+        let message = BrowserToContentMessage.pasteboardDropHitTestRequest(requestID: requestID,
+                                                                           point: point,
+                                                                           pasteboardTypes: pasteboardTypes,
+                                                                           operationMask: operationMask,
+                                                                           modifierFlags: modifierFlags)
+        do {
+            try pluginSocket.sendBlocking(message.encode())
+        } catch {
+            pasteboardDropHitTestReplies.remove(requestID)
+            print("Browser: Failed to send pasteboardDropHitTestRequest message: \(error)")
+            return nil
+        }
+
+        let timeout = max(TimeInterval(timeoutMilliseconds) / 1000, 0.001)
+        guard let result = replyBox.wait(until: Date(timeIntervalSinceNow: timeout)) else {
+            pasteboardDropHitTestReplies.remove(requestID)
+            return nil
+        }
+        return result
+    }
+
+    func requestAccessibilitySnapshotSynchronously(timeoutMilliseconds: UInt32) -> OuterframeAccessibilitySnapshot? {
+        guard socketReady else { return nil }
+
+        let requestID = UUID()
+        let replyBox = accessibilitySnapshotReplies.register(requestID)
+        let message = BrowserToContentMessage.accessibilitySnapshotRequest(requestID: requestID)
+        do {
+            try pluginSocket.sendBlocking(message.encode())
+        } catch {
+            accessibilitySnapshotReplies.remove(requestID)
+            print("Browser: Failed to send accessibilitySnapshotRequest message: \(error)")
+            return nil
+        }
+
+        let timeout = max(TimeInterval(timeoutMilliseconds) / 1000, 0.001)
+        guard let reply = replyBox.wait(until: Date(timeIntervalSinceNow: timeout)) else {
+            accessibilitySnapshotReplies.remove(requestID)
+            return nil
+        }
+        return reply.snapshotData.flatMap { OuterframeAccessibilitySnapshot.deserialize(from: $0) }
+    }
+
+    func sendPasteboardAccessResponse(requestID: UUID,
+                                      granted: Bool,
+                                      items: [OuterframeContentPasteboardItem]) {
+        sendToOuterframeContent(.pasteboardAccessResponse(requestID: requestID,
+                                                          granted: granted,
+                                                          items: items))
     }
 
     func sendSetCursorPosition(fieldID: UUID, position: UInt64, modifySelection: Bool) {
@@ -763,8 +1084,10 @@ final class OuterframeContentConnection: NSObject {
         cancelPluginLoadedTimeout()
         failPendingUnloadPluginRequests(with: OuterframeContentConnectionError.disconnected)
 
+        let pid = outerframeContentPID
+
         // Send shutdown messages so plugin and OuterframeContent can clean up
-        if outerframeContentPID != nil {
+        if pid != nil {
             // First, send shutdown to plugin so it can clean up
             do {
                 let pluginShutdownMessage = BrowserToContentMessage.shutdown
@@ -782,9 +1105,12 @@ final class OuterframeContentConnection: NSObject {
             }
         }
 
-        // Ask XPC service to ensure the process exits (with 2 second timeout)
+        var xpcHandledTermination = false
         if let instanceId = outerframeContentInstanceId {
-            await Self.ensureOuterframeContentExitsViaXPC(instanceId: instanceId, timeout: 2.0)
+            xpcHandledTermination = await Self.ensureOuterframeContentExitsViaXPC(instanceId: instanceId, timeout: 2.0)
+        }
+        if !xpcHandledTermination, let pid {
+            await Self.ensureOuterframeContentExitsLocally(pid: pid, timeout: 2.0)
         }
 
         outerframeContentPID = nil
@@ -794,7 +1120,7 @@ final class OuterframeContentConnection: NSObject {
 
         failPendingLoadPluginRequests(with: OuterframeContentConnectionError.disconnected)
         failPendingCopyRequests()
-        failPendingAccessibilityRequests()
+        failPendingFilePromiseWriteRequests(with: OuterframeContentConnectionError.disconnected)
 
         lastSystemAppearancePayload = nil
 
@@ -802,29 +1128,56 @@ final class OuterframeContentConnection: NSObject {
         proxyUsername = nil
         proxyPassword = nil
 
+        stagedFileDirectoryURL = nil
+
         await infrastructureSocket.stop()
         await pluginSocket.stop()
         stopOutputMonitoring()
     }
 
-    private nonisolated static func ensureOuterframeContentExitsViaXPC(instanceId: UUID, timeout: TimeInterval) async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+    private nonisolated static func ensureOuterframeContentExitsViaXPC(instanceId: UUID, timeout: TimeInterval) async -> Bool {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
             guard let proxy = outerframeProcessesConnection.remoteObjectProxyWithErrorHandler({ error in
                 print("Browser: XPC error during ensureOuterframeContentExits: \(error)")
-                continuation.resume()
+                continuation.resume(returning: false)
             }) as? OuterframeProcessesProtocol else {
                 print("Browser: Failed to get XPC proxy for ensureOuterframeContentExits")
-                continuation.resume()
+                continuation.resume(returning: false)
                 return
             }
 
-            proxy.ensureOuterframeContentExits(instanceId: instanceId, timeout: timeout) { error in
+            proxy.ensureOuterframeContentExits(instanceId: instanceId, timeout: timeout) { didFindInstance, error in
                 if let error = error {
                     print("Browser: ensureOuterframeContentExits error: \(error)")
                 }
-                continuation.resume()
+                continuation.resume(returning: didFindInstance && error == nil)
             }
         }
+    }
+
+    private nonisolated static func ensureOuterframeContentExitsLocally(pid: pid_t, timeout: TimeInterval) async {
+        guard pid > 1 else { return }
+        await Task.detached(priority: .utility) {
+            let deadline = Date(timeIntervalSinceNow: timeout)
+            while Date() < deadline {
+                if !Self.processExists(pid: pid) {
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+
+            guard Self.processExists(pid: pid) else { return }
+            if kill(pid, SIGKILL) != 0 && errno != ESRCH {
+                print("Browser: Failed to kill OuterframeContent process \(pid) locally (errno \(errno))")
+            }
+        }.value
+    }
+
+    private nonisolated static func processExists(pid: pid_t) -> Bool {
+        if kill(pid, 0) == 0 {
+            return true
+        }
+        return errno == EPERM
     }
 }
 
@@ -926,6 +1279,22 @@ extension OuterframeContentConnection: OuterframeContentSocketDelegate {
             }
             delegate.showPluginRequestedContextMenu(attributedText: attributedText, at: location)
 
+        case .showContextMenuItems(let menuID, let locationX, let locationY, let attributedTextData, let items):
+            guard let delegate = delegate else { return }
+            let attributedText: NSAttributedString?
+            if let attributedTextData {
+                attributedText = decodeAttributedString(from: attributedTextData)
+                if attributedText == nil {
+                    print("Browser: Failed to decode attributed text for context menu items")
+                }
+            } else {
+                attributedText = nil
+            }
+            delegate.showPluginRequestedContextMenuItems(menuID: menuID,
+                                                         attributedText: attributedText,
+                                                         items: items,
+                                                         at: CGPoint(x: locationX, y: locationY))
+
         case .showDefinition(let attributedTextData, let locationX, let locationY):
             guard let delegate = delegate else { return }
             let location = CGPoint(x: locationX, y: locationY)
@@ -942,24 +1311,45 @@ extension OuterframeContentConnection: OuterframeContentSocketDelegate {
             }
             delegate.performHapticFeedback(feedbackStyle)
 
-        case .textCursorUpdate(let cursors):
-            guard let delegate = delegate else { return }
-            delegate.handleTextCursorUpdate(cursors: cursors)
+        case .textInputGeometryUpdate(let geometry):
+            delegate?.handleTextInputGeometryUpdate(geometry)
 
-        case .copySelectedPasteboardResponse(let requestID, let items):
+        case .selectionToPasteboardResponse(let requestID, let items):
             if let completion = pendingCopyRequests.removeValue(forKey: requestID) {
                 completion(items)
             } else {
-                print("Browser: Received copySelectedPasteboardResponse for unknown request ID \(requestID)")
+                print("Browser: Received selectionToPasteboardResponse for unknown request ID \(requestID)")
             }
 
-        case .accessibilitySnapshotResponse(let requestID, let snapshotData):
-            if let completion = pendingAccessibilitySnapshotRequests.removeValue(forKey: requestID) {
-                let snapshot = snapshotData.flatMap { OuterframeAccessibilitySnapshot.deserialize(from: $0) }
-                completion(snapshot)
-            } else {
-                print("Browser: Received accessibilitySnapshotResponse for unknown request ID \(requestID)")
+        case .pasteboardAccessRequest(let requestID, let operation, let pasteboardTypes, let items):
+            delegate?.handlePasteboardAccessRequest(requestID: requestID,
+                                                    operation: operation,
+                                                    pasteboardTypeIdentifiers: pasteboardTypes,
+                                                    items: items)
+
+        case .beginDraggingPasteboardItems(let items, let operationMask):
+            delegate?.beginDraggingPasteboardItems(items, operationMask: operationMask)
+
+        case .releaseDroppedFileAccess(let accessID):
+            delegate?.releaseDroppedFileAccess(accessID: accessID)
+
+        case .filePromiseWriteResponse(let requestID, let promiseID, let success, let localPath, let deleteWhenDone, let errorMessage):
+            guard let completion = pendingFilePromiseWriteRequests.removeValue(forKey: requestID) else {
+                print("Browser: Received filePromiseWriteResponse for unknown request ID \(requestID)")
+                return
             }
+            if success, let localPath {
+                completion(.success(OuterframeFilePromiseWriteResult(promiseID: promiseID,
+                                                                     localPath: localPath,
+                                                                     deleteWhenDone: deleteWhenDone)))
+            } else {
+                completion(.failure(NSError(domain: NSCocoaErrorDomain,
+                                            code: NSFileWriteUnknownError,
+                                            userInfo: [NSLocalizedDescriptionKey: errorMessage ?? "Content failed to write promised file."])))
+            }
+
+        case .accessibilitySnapshotResponse(let requestID, _):
+            print("Browser: Received accessibilitySnapshotResponse outside synchronous wait for request ID \(requestID)")
 
         case .accessibilityTreeChanged(let notificationMask):
             delegate?.handleAccessibilityTreeChanged(notificationMask: notificationMask)
@@ -969,10 +1359,42 @@ extension OuterframeContentConnection: OuterframeContentSocketDelegate {
                                                 displayString: displayString,
                                                 preferredSize: preferredSize)
 
-        case .setPasteboardCapabilities(let canCopy, let canCut, let pasteboardTypes):
-            delegate?.setPasteboardCapabilities(canCopy: canCopy,
-                                                canCut: canCut,
-                                                pasteboardTypeIdentifiers: pasteboardTypes)
+        case .navigate(let urlString):
+            delegate?.handlePluginNavigate(urlString: urlString)
+
+        case .openNewTab(let urlString, let displayString):
+            delegate?.handlePluginOpenNewTab(urlString: urlString,
+                                             displayString: displayString)
+
+        case .historyPushEntry(let entryID, let urlString):
+            delegate?.handlePluginHistoryPushEntry(entryID: entryID, urlString: urlString)
+
+        case .historyReplaceEntry(let entryID, let urlString):
+            delegate?.handlePluginHistoryReplaceEntry(entryID: entryID, urlString: urlString)
+
+        case .historyGo(let delta):
+            delegate?.handlePluginHistoryGo(delta: delta)
+
+        case .setTitle(let title):
+            delegate?.handlePluginSetTitle(title)
+
+        case .setIcon(let icon):
+            delegate?.handlePluginSetIcon(icon)
+
+        case .editCommandValidationResponse:
+            break
+
+        case .setPasteboardDropBehaviorUniform(let pasteboardTypes):
+            delegate?.setPasteboardDropBehaviorUniform(pasteboardTypes)
+
+        case .setAcceptedPasteboardPasteTypes(let pasteboardTypes):
+            delegate?.setAcceptedPasteboardPasteTypes(pasteboardTypes)
+
+        case .setPasteboardDropBehaviorHitTest:
+            delegate?.setPasteboardDropBehaviorHitTest()
+
+        case .pasteboardDropHitTestResponse:
+            break
         }
     }
 
@@ -982,6 +1404,6 @@ extension OuterframeContentConnection: OuterframeContentSocketDelegate {
         failPendingUnloadPluginRequests(with: OuterframeContentConnectionError.disconnected)
         failPendingLoadPluginRequests(with: OuterframeContentConnectionError.disconnected)
         failPendingCopyRequests()
-        failPendingAccessibilityRequests()
+        failPendingFilePromiseWriteRequests(with: OuterframeContentConnectionError.disconnected)
     }
 }
